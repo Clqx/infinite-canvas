@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { createStore } from "zustand/vanilla";
 import { createJSONStorage, persist } from "zustand/middleware";
 
+import { createLocalForageStorage } from "../lib/localforage-storage";
 import { createBrowserExclusiveRunner, createReliableStateStorage, PersistenceHydrationRejectedError } from "./reliable-state-storage";
 
 const KEY = "test-state";
@@ -294,6 +295,64 @@ test("a real Zustand version migration reaches authoritative storage", async (t)
     assert.deepEqual(store.getState().items, ["legacy", "migrated"]);
     assert.deepEqual(JSON.parse(storedPayload(backend.value) || "null"), { state: { items: ["legacy", "migrated"] }, version: 1 });
     assert.deepEqual((JSON.parse(backend.value || "null") as { state: unknown; version: number }).state, { items: ["legacy", "migrated"] });
+});
+
+test("a delayed legacy migration cannot overwrite a newer value committed by another tab", async (t) => {
+    let authoritativeValue: string | null = null;
+    let legacyValue: string | null = "legacy";
+    let writeCount = 0;
+    let releaseFirstWrite!: () => void;
+    let firstWriteStarted!: () => void;
+    const firstWriteBlocked = new Promise<void>((resolve) => (releaseFirstWrite = resolve));
+    const firstWriteEntered = new Promise<void>((resolve) => (firstWriteStarted = resolve));
+    const authoritative = {
+        getItem: async () => authoritativeValue,
+        setItem: async (_name: string, value: string) => {
+            writeCount += 1;
+            if (writeCount === 1) {
+                firstWriteStarted();
+                await firstWriteBlocked;
+            }
+            authoritativeValue = value;
+        },
+        removeItem: async () => void (authoritativeValue = null),
+    };
+    const legacy = {
+        getItem: () => legacyValue,
+        removeItem: () => void (legacyValue = null),
+    };
+    const runExclusive = sharedExclusiveRunner();
+    const delayedTab = createReliableStateStorage({
+        key: KEY,
+        debounceMs: 60_000,
+        runExclusive,
+        storage: createLocalForageStorage({ authoritative, legacy }),
+    });
+    const newerTab = createReliableStateStorage({
+        key: KEY,
+        debounceMs: 60_000,
+        runExclusive,
+        storage: createLocalForageStorage({ authoritative, legacy }),
+    });
+    t.after(() => {
+        delayedTab.dispose();
+        newerTab.dispose();
+    });
+
+    const delayedHydration = delayedTab.getItem(KEY);
+    await firstWriteEntered;
+    const newerCommit = (async () => {
+        await newerTab.getItem(KEY);
+        assert.equal(newerTab.markHydrated(), true);
+        newerTab.setItem(KEY, "newer");
+        await newerTab.flush();
+    })();
+    setTimeout(releaseFirstWrite, 0);
+
+    await Promise.all([delayedHydration, newerCommit]);
+
+    assert.equal(storedPayload(authoritativeValue), "newer");
+    assert.equal(storedGeneration(authoritativeValue), 1);
 });
 
 test("a stale tab cannot overwrite a newer value after retrying a failed write", async (t) => {

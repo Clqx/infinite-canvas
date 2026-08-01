@@ -163,7 +163,8 @@ export function createReliableStateStorage({
         }, delayMs);
     };
 
-    const readStoredSnapshot = async () => decodeDurableSnapshot(await Promise.resolve(storage.getItem(key)));
+    const readStoredSnapshotUnlocked = async () => decodeDurableSnapshot(await Promise.resolve(storage.getItem(key)));
+    const readHydrationSnapshot = () => runExclusive(readStoredSnapshotUnlocked);
 
     const commit = async (write: PendingWrite, generation: number) => Promise.resolve(storage.setItem(key, encodeDurableSnapshot({ generation, value: write.value, writeId: write.id })));
 
@@ -185,7 +186,7 @@ export function createReliableStateStorage({
                     await runExclusive(async () => {
                         let current: DurableSnapshot;
                         try {
-                            current = await readStoredSnapshot();
+                            current = await readStoredSnapshotUnlocked();
                         } catch (error) {
                             failure = error;
                             return;
@@ -208,7 +209,7 @@ export function createReliableStateStorage({
                             failure = error;
                         }
                         try {
-                            const verified = await readStoredSnapshot();
+                            const verified = await readStoredSnapshotUnlocked();
                             committed = verified.generation === nextGeneration && verified.writeId === write.id && verified.value === write.value;
                             if (committed) committedGeneration = verified.generation;
                         } catch (error) {
@@ -299,7 +300,7 @@ export function createReliableStateStorage({
             deferredHydrationWrite = null;
             emit({ phase: "hydrating", ready: false, conflict: false, error: "" });
             try {
-                const snapshot = await readStoredSnapshot();
+                const snapshot = await readHydrationSnapshot();
                 lastDurableValue = snapshot.value;
                 lastDurableGeneration = snapshot.generation;
                 hydrationReadComplete = true;
