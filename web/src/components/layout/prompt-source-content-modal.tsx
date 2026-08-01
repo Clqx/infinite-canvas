@@ -7,6 +7,7 @@ import { useCopyText } from "@/hooks/use-copy-text";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { fetchSourcePrompts, refreshSource, type Prompt } from "@/services/api/prompts";
 import type { PromptSource } from "@/services/api/prompt-source-presets";
+import { flushAppDataPersistence } from "@/services/app-data-persistence-actions";
 
 export function PromptSourceContentModal({ source, onClose }: { source: PromptSource | null; onClose: () => void }) {
     const { message } = App.useApp();
@@ -36,9 +37,14 @@ export function PromptSourceContentModal({ source, onClose }: { source: PromptSo
         else setItems([]);
     }, [source, load]);
 
-    const saveAsset = (item: Prompt) => {
+    const saveAsset = async (item: Prompt) => {
         addAsset({ kind: "text", title: item.title, coverUrl: item.coverUrl, tags: item.tags, source: item.category, data: { content: item.prompt }, metadata: { source: "prompt-library", promptId: item.id, githubUrl: item.githubUrl } });
-        message.success("已加入我的资产");
+        try {
+            await flushAppDataPersistence();
+            message.success("已加入我的资产");
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "资产保存失败");
+        }
     };
 
     return (

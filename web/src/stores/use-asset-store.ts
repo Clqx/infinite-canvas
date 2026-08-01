@@ -2,9 +2,11 @@ import { create } from "zustand";
 import { persist, type PersistStorage, type StorageValue } from "zustand/middleware";
 
 import { nanoid } from "nanoid";
-import { localForageStorage } from "@/lib/localforage-storage";
+import { ASSET_STATE_STORAGE_KEY, appDataPersistence, assetStateStorage, withAuthoritativeAppData } from "@/services/app-data-persistence";
 import { cleanupUnusedImages, resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { cleanupUnusedMedia, resolveMediaUrl } from "@/services/file-storage";
+import { cleanupAppMediaAfterFlush } from "@/services/app-media-cleanup";
+import { withAllStoredGenerationLogs } from "@/services/generation-log-storage";
 
 export type AssetKind = "text" | "image" | "video";
 export type TextAsset = AssetBase<"text"> & { data: { content: string } };
@@ -32,14 +34,12 @@ type AssetStore = {
     updateAsset: (id: string, patch: Partial<Omit<Asset, "id" | "createdAt">>) => void;
     removeAsset: (id: string) => void;
     replaceAssets: (assets: Asset[]) => void;
-    cleanupImages: (extra?: unknown) => void;
+    cleanupImages: (extra?: unknown) => Promise<void>;
 };
-
-const ASSET_STORE_KEY = "infinite-canvas:asset_store";
 
 const assetStorage: PersistStorage<AssetStore> = {
     getItem: async (name) => {
-        const value = await localForageStorage.getItem(name);
+        const value = await assetStateStorage.getItem(name);
         if (!value) return null;
         const parsed = JSON.parse(value) as StorageValue<AssetStore>;
         parsed.state.assets = await Promise.all(
@@ -59,8 +59,8 @@ const assetStorage: PersistStorage<AssetStore> = {
         );
         return parsed;
     },
-    setItem: (name, value) => localForageStorage.setItem(name, JSON.stringify(value)),
-    removeItem: (name) => localForageStorage.removeItem(name),
+    setItem: (name, value) => assetStateStorage.setItem(name, JSON.stringify(value)),
+    removeItem: (name) => assetStateStorage.removeItem(name),
 };
 
 export const useAssetStore = create<AssetStore>()(
@@ -78,27 +78,29 @@ export const useAssetStore = create<AssetStore>()(
                 set((state) => ({
                     assets: state.assets.map((asset) => (asset.id === id ? ({ ...asset, ...patch, updatedAt: new Date().toISOString() } as Asset) : asset)),
                 })),
-            removeAsset: (id) =>
-                set((state) => {
-                    const assets = state.assets.filter((asset) => asset.id !== id);
-                    get().cleanupImages({ assets });
-                    return { assets };
-                }),
+            removeAsset: (id) => set((state) => ({ assets: state.assets.filter((asset) => asset.id !== id) })),
             replaceAssets: (assets) => set({ assets }),
-            cleanupImages: (extra) => {
-                window.setTimeout(async () => {
-                    const { useCanvasStore } = await import("@/stores/canvas/use-canvas-store");
-                    await cleanupUnusedImages({ assets: get().assets, projects: useCanvasStore.getState().projects, extra });
-                    await cleanupUnusedMedia({ assets: get().assets, projects: useCanvasStore.getState().projects, extra });
-                }, 0);
+            cleanupImages: async (extra) => {
+                await cleanupAppMediaAfterFlush({
+                    flush: appDataPersistence.flushAll,
+                    withUsedData: (operation) => withAuthoritativeAppData((data) => withAllStoredGenerationLogs((generationLogs) => operation({ ...data, generationLogs, extra }))),
+                    cleanupImages: cleanupUnusedImages,
+                    cleanupMedia: cleanupUnusedMedia,
+                });
             },
         }),
         {
-            name: ASSET_STORE_KEY,
+            name: ASSET_STATE_STORAGE_KEY,
             storage: assetStorage,
+            version: 1,
+            migrate: (state) => ({ assets: Array.isArray((state as Partial<AssetStore> | undefined)?.assets) ? (state as Partial<AssetStore>).assets : [] }) as AssetStore,
             partialize: (state) => ({ assets: state.assets }) as StorageValue<AssetStore>["state"],
-            onRehydrateStorage: () => () => {
-                useAssetStore.setState({ hydrated: true });
+            onRehydrateStorage: () => (_state, error) => {
+                if (error) {
+                    if (assetStateStorage.markHydrationError(error)) useAssetStore.setState({ hydrated: false });
+                    return;
+                }
+                if (assetStateStorage.markHydrated()) useAssetStore.setState({ hydrated: true });
             },
         },
     ),

@@ -1,7 +1,6 @@
 import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImagePlus, LoaderCircle, PenLine, Plus, SlidersHorizontal, Sparkles, Trash2, Upload } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { App, Button, Checkbox, Drawer, Empty, Image, Input, Modal, Tag, Tooltip, Typography } from "antd";
-import localforage from "localforage";
 import { saveAs } from "file-saver";
 
 import { ImageSettingsPanel } from "@/components/image-settings-panel";
@@ -15,7 +14,9 @@ import { useThemeStore } from "@/stores/use-theme-store";
 import { nanoid } from "nanoid";
 import { formatBytes, formatDuration, getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { requestEdit, requestGeneration } from "@/services/api/image";
-import { deleteStoredImages, resolveImageUrl, uploadImage } from "@/services/image-storage";
+import { resolveImageUrl, uploadImage } from "@/services/image-storage";
+import { flushAppDataPersistence } from "@/services/app-data-persistence-actions";
+import { readStoredGenerationLogs, removeStoredGenerationLogs, setStoredGenerationLog } from "@/services/generation-log-storage";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
 import type { ReferenceImage } from "@/types/image";
@@ -64,8 +65,6 @@ type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => 
 
 const LOG_STORE_KEY = "infinite-canvas:image_generation_logs";
 const RESULT_ACTION_BUTTON_CLASS = "min-w-0 px-1.5 [&_.ant-btn-icon]:shrink-0 [&>span:last-child]:min-w-0 [&>span:last-child]:truncate";
-const logStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_generation_logs" });
-
 export default function ImagePage() {
     const { message } = App.useApp();
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -76,6 +75,7 @@ export default function ImagePage() {
     const isAiConfigReady = useConfigStore((state) => state.isAiConfigReady);
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const addAsset = useAssetStore((state) => state.addAsset);
+    const cleanupAssetImages = useAssetStore((state) => state.cleanupImages);
     const [prompt, setPrompt] = useState("");
     const [references, setReferences] = useState<ReferenceImage[]>([]);
     const [results, setResults] = useState<GenerationResult[]>([]);
@@ -243,17 +243,22 @@ export default function ImagePage() {
     };
 
     const saveResultToAssets = async (image: GeneratedImage, index: number) => {
-        const stored = await uploadImage(image.dataUrl);
-        addAsset({
-            kind: "image",
-            title: `生成结果 ${index + 1}`,
-            coverUrl: stored.url,
-            tags: [],
-            source: "生图工作台",
-            data: { dataUrl: stored.url, storageKey: stored.storageKey, width: stored.width, height: stored.height, bytes: stored.bytes, mimeType: stored.mimeType },
-            metadata: { source: "image-page", prompt },
-        });
-        message.success("已加入我的资产");
+        try {
+            const stored = await uploadImage(image.dataUrl);
+            addAsset({
+                kind: "image",
+                title: `生成结果 ${index + 1}`,
+                coverUrl: stored.url,
+                tags: [],
+                source: "生图工作台",
+                data: { dataUrl: stored.url, storageKey: stored.storageKey, width: stored.width, height: stored.height, bytes: stored.bytes, mimeType: stored.mimeType },
+                metadata: { source: "image-page", prompt },
+            });
+            await flushAppDataPersistence();
+            message.success("已加入我的资产");
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "资产保存失败");
+        }
     };
 
     const insertPickedAsset = async (payload: InsertAssetPayload) => {
@@ -278,19 +283,30 @@ export default function ImagePage() {
         setPreviewLog(null);
     };
 
-    const deleteSelectedLogs = () => {
-        const imageKeys = logs.filter((log) => selectedLogIds.includes(log.id)).flatMap((log) => log.images.map((image) => image.storageKey).filter((key): key is string => Boolean(key)));
-        void Promise.all([deleteStoredImages(imageKeys), ...selectedLogIds.map((id) => logStore.removeItem(id))]).then(refreshLogs);
+    const deleteSelectedLogs = async () => {
+        const deletedIds = new Set(selectedLogIds);
+        try {
+            await removeStoredGenerationLogs("image", selectedLogIds);
+            await refreshLogs();
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "删除生成记录失败");
+            return;
+        }
         if (previewLog && selectedLogIds.includes(previewLog.id)) {
             setPreviewLog(null);
             setResults([]);
         }
         setSelectedLogIds([]);
         setDeleteConfirmOpen(false);
+        try {
+            await cleanupAssetImages({ references, results, previewLog: previewLog && !deletedIds.has(previewLog.id) ? previewLog : null });
+        } catch (error) {
+            message.warning(error instanceof Error ? `记录已删除，但媒体清理未完成：${error.message}` : "记录已删除，但媒体清理未完成");
+        }
     };
 
     const saveLog = (log: GenerationLog) => {
-        void logStore.setItem(log.id, serializeLog(log)).then(refreshLogs);
+        void setStoredGenerationLog("image", log.id, serializeLog(log)).then(refreshLogs);
     };
 
     const refreshLogs = async () => setLogs(await readStoredLogs());
@@ -770,10 +786,7 @@ function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: Ge
 async function readStoredLogs() {
     if (typeof window === "undefined") return [];
     try {
-        const values: GenerationLog[] = [];
-        await logStore.iterate<GenerationLog, void>((value) => {
-            values.push(value);
-        });
+        const values = (await readStoredGenerationLogs("image")) as GenerationLog[];
         const logs = await Promise.all(values.map(normalizeLog));
         return logs.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
     } catch {

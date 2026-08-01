@@ -11,6 +11,7 @@ import {
     type CredentialVaultPayload,
 } from "@/services/credential-vault";
 import { defaultWebdavSyncConfig, useConfigStore } from "@/stores/use-config-store";
+import { flushAppDataPersistence } from "@/services/app-data-persistence-actions";
 import { defaultPromptSourceSchedule, normalizePromptSourceState, usePromptSourceStore } from "@/stores/use-prompt-source-store";
 import { useAgentStore } from "@/stores/use-agent-store";
 import { useUserStore } from "@/stores/use-user-store";
@@ -89,6 +90,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         }
     },
     lock: async () => {
+        await flushAppDataPersistence();
         await get().flush();
         stopSubscriptions();
         await credentialVault.lock();

@@ -2,6 +2,7 @@ import localforage from "localforage";
 
 import { nanoid } from "nanoid";
 import { readImageMeta } from "@/lib/image-utils";
+import { mediaGarbageCollector } from "@/services/media-garbage-collector";
 
 export type UploadedImage = {
     url: string;
@@ -19,6 +20,7 @@ export async function uploadImage(input: string | Blob): Promise<UploadedImage> 
     const blob = typeof input === "string" ? await (await fetch(input)).blob() : input;
     const storageKey = `image:${nanoid()}`;
     await store.setItem(storageKey, blob);
+    await mediaGarbageCollector.protect(storageKey);
     const url = URL.createObjectURL(blob);
     objectUrls.set(storageKey, url);
     const meta = await readImageMeta(url);
@@ -42,6 +44,7 @@ export async function getImageBlob(storageKey: string) {
 
 export async function setImageBlob(storageKey: string, blob: Blob) {
     await store.setItem(storageKey, blob);
+    await mediaGarbageCollector.protect(storageKey);
     const url = URL.createObjectURL(blob);
     objectUrls.set(storageKey, url);
     return url;
@@ -66,11 +69,13 @@ export async function deleteStoredImages(keys: Iterable<string>) {
 
 export async function cleanupUnusedImages(usedData: unknown) {
     const usedKeys = collectImageStorageKeys(usedData);
-    const unused: string[] = [];
+    const storedKeys: string[] = [];
     await store.iterate((_value, key) => {
-        if (!usedKeys.has(key)) unused.push(key);
+        storedKeys.push(key);
     });
-    await deleteStoredImages(unused);
+    const deletions = await mediaGarbageCollector.findDeletions(storedKeys, usedKeys);
+    await deleteStoredImages(deletions);
+    await mediaGarbageCollector.confirmDeleted(deletions);
 }
 
 export function collectImageStorageKeys(value: unknown, keys = new Set<string>()) {

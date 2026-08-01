@@ -9,6 +9,7 @@ import { useCopyText } from "@/hooks/use-copy-text";
 import { cn } from "@/lib/utils";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { ALL_PROMPTS_OPTION, type Prompt } from "@/services/api/prompts";
+import { flushAppDataPersistence } from "@/services/app-data-persistence-actions";
 
 export default function PromptsPage() {
     const { message } = App.useApp();
@@ -29,9 +30,14 @@ export default function PromptsPage() {
         setSelectedTags((items) => (items.includes(tag) ? items.filter((item) => item !== tag) : [...items, tag]));
     };
 
-    const savePromptAsset = (item: Prompt) => {
+    const savePromptAsset = async (item: Prompt) => {
         addAsset({ kind: "text", title: item.title, coverUrl: item.coverUrl, tags: item.tags, source: item.category, data: { content: item.prompt }, metadata: { source: "prompt-library", promptId: item.id, githubUrl: item.githubUrl } });
-        message.success("已加入我的资产");
+        try {
+            await flushAppDataPersistence();
+            message.success("已加入我的资产");
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "资产保存失败");
+        }
     };
 
     const handleListScroll = (event: UIEvent<HTMLDivElement>) => {
@@ -41,7 +47,10 @@ export default function PromptsPage() {
 
     return (
         <div className="flex h-full flex-col overflow-hidden bg-background text-stone-800 dark:text-stone-100">
-            <main className="min-h-0 flex-1 overflow-y-auto bg-background bg-[radial-gradient(#e5e7eb_1px,transparent_1px)] px-4 py-6 [background-size:16px_16px] sm:px-6 lg:py-8 dark:bg-[radial-gradient(rgba(245,245,244,.16)_1px,transparent_1px)]" onScroll={handleListScroll}>
+            <main
+                className="min-h-0 flex-1 overflow-y-auto bg-background bg-[radial-gradient(#e5e7eb_1px,transparent_1px)] px-4 py-6 [background-size:16px_16px] sm:px-6 lg:py-8 dark:bg-[radial-gradient(rgba(245,245,244,.16)_1px,transparent_1px)]"
+                onScroll={handleListScroll}
+            >
                 <div className="mx-auto max-w-7xl">
                     <div className="text-center">
                         <h1 className="text-2xl font-semibold text-stone-950 dark:text-stone-100">提示词中心</h1>
@@ -55,15 +64,37 @@ export default function PromptsPage() {
                                 <div className="flex flex-wrap gap-1.5">
                                     {promptTags.map((tag) => {
                                         const active = tag === ALL_PROMPTS_OPTION ? selectedTags.length === 0 : selectedTags.includes(tag);
-                                        return <Tag.CheckableTag key={tag} checked={active} className={cn("prompt-filter-tag", active && "is-active")} onChange={() => toggleTag(tag)}>{tag}</Tag.CheckableTag>;
+                                        return (
+                                            <Tag.CheckableTag key={tag} checked={active} className={cn("prompt-filter-tag", active && "is-active")} onChange={() => toggleTag(tag)}>
+                                                {tag}
+                                            </Tag.CheckableTag>
+                                        );
                                     })}
                                 </div>
                             </div>
                         </aside>
                         <section className="min-w-0">
                             <Input size="large" prefix={<Search className="size-4 text-stone-400" />} value={titleKeyword} placeholder="搜索标题、内容或标签" onChange={(event) => setTitleKeyword(event.target.value)} />
-                            {query.isLoading ? <div className="flex h-60 items-center justify-center"><Spin /></div> : null}
-                            {!query.isLoading ? <div className="mt-5"><PromptGrid items={promptItems} onOpen={setSelectedPrompt} renderActions={(item) => <Button size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => savePromptAsset(item)}>加入资产</Button>} onCopy={(item) => copyText(item.prompt, "提示词已复制")} emptyText="没有找到匹配的提示词" /></div> : null}
+                            {query.isLoading ? (
+                                <div className="flex h-60 items-center justify-center">
+                                    <Spin />
+                                </div>
+                            ) : null}
+                            {!query.isLoading ? (
+                                <div className="mt-5">
+                                    <PromptGrid
+                                        items={promptItems}
+                                        onOpen={setSelectedPrompt}
+                                        renderActions={(item) => (
+                                            <Button size="small" icon={<FolderPlus className="size-3.5" />} onClick={() => void savePromptAsset(item)}>
+                                                加入资产
+                                            </Button>
+                                        )}
+                                        onCopy={(item) => copyText(item.prompt, "提示词已复制")}
+                                        emptyText="没有找到匹配的提示词"
+                                    />
+                                </div>
+                            ) : null}
                             <div className="mt-6 text-center text-xs text-stone-500 dark:text-stone-400">{query.isFetchingNextPage ? "加载中..." : query.hasNextPage ? "继续向下滚动加载更多" : promptItems.length > 0 ? "已经到底了" : null}</div>
                         </section>
                     </div>
@@ -76,10 +107,29 @@ export default function PromptsPage() {
 }
 
 function PromptFilter({ label, options, selected, onChange }: { label: string; options: string[]; selected: string; onChange: (value: string) => void }) {
-    return <div><div className="mb-2 text-xs font-semibold uppercase tracking-widest text-stone-400 dark:text-stone-500">{label}</div><div className="flex flex-wrap gap-1.5">{options.map((option) => <Tag.CheckableTag key={option} checked={selected === option} className={cn("prompt-filter-tag", selected === option && "is-active")} onChange={() => onChange(option)}>{option}</Tag.CheckableTag>)}</div></div>;
+    return (
+        <div>
+            <div className="mb-2 text-xs font-semibold uppercase tracking-widest text-stone-400 dark:text-stone-500">{label}</div>
+            <div className="flex flex-wrap gap-1.5">
+                {options.map((option) => (
+                    <Tag.CheckableTag key={option} checked={selected === option} className={cn("prompt-filter-tag", selected === option && "is-active")} onChange={() => onChange(option)}>
+                        {option}
+                    </Tag.CheckableTag>
+                ))}
+            </div>
+        </div>
+    );
 }
 
 function PromptGrid({ items, onOpen, onCopy, renderActions, emptyText }: { items: Prompt[]; onOpen: (item: Prompt) => void; onCopy: (item: Prompt) => void; renderActions: (item: Prompt) => ReactNode; emptyText: string }) {
-    return <div><div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">{items.map((item) => <PromptCard key={`${item.sourceId}:${item.id}`} item={item} onOpen={() => onOpen(item)} onCopy={() => onCopy(item)} extraAction={renderActions(item)} />)}</div>{items.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={emptyText} className="py-16" /> : null}</div>;
+    return (
+        <div>
+            <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
+                {items.map((item) => (
+                    <PromptCard key={`${item.sourceId}:${item.id}`} item={item} onOpen={() => onOpen(item)} onCopy={() => onCopy(item)} extraAction={renderActions(item)} />
+                ))}
+            </div>
+            {items.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={emptyText} className="py-16" /> : null}
+        </div>
+    );
 }
-

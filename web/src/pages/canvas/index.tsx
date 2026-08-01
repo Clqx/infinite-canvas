@@ -6,6 +6,7 @@ import { Download, FileUp, Plus } from "lucide-react";
 import { readZip } from "@/lib/zip";
 import { setMediaBlob } from "@/services/file-storage";
 import { setImageBlob } from "@/services/image-storage";
+import { flushAppDataPersistence } from "@/services/app-data-persistence-actions";
 import { CanvasDeleteProjectsDialog } from "@/components/canvas/canvas-delete-projects-dialog";
 import { CanvasProjectCard } from "@/components/canvas/canvas-project-card";
 import type { CanvasExportFile } from "@/types/canvas-export";
@@ -51,9 +52,10 @@ export default function CanvasPage() {
                 ),
             );
             data.projects.forEach((item) => importProject(item.project));
+            await flushAppDataPersistence();
             message.success(`已导入 ${data.projects.length} 个画布`);
-        } catch {
-            message.error("导入失败，请选择有效的画布压缩包");
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "导入失败，请选择有效的画布压缩包");
         } finally {
             if (inputRef.current) inputRef.current.value = "";
         }
@@ -78,7 +80,16 @@ export default function CanvasPage() {
                     <div className="flex items-center gap-2">
                         {selectedIds.length ? (
                             <>
-                                <Button disabled={!hydrated} icon={<Download className="size-4" />} onClick={() => void exportCanvasProjects(projects.filter((project) => selectedIds.includes(project.id)), `无限画布-${selectedIds.length}个项目`)}>
+                                <Button
+                                    disabled={!hydrated}
+                                    icon={<Download className="size-4" />}
+                                    onClick={() =>
+                                        void exportCanvasProjects(
+                                            projects.filter((project) => selectedIds.includes(project.id)),
+                                            `无限画布-${selectedIds.length}个项目`,
+                                        )
+                                    }
+                                >
                                     导出选中
                                 </Button>
                                 <Button disabled={!hydrated} onClick={() => setDeleteIds(selectedIds)}>

@@ -1,5 +1,6 @@
 import localforage from "localforage";
 import { nanoid } from "nanoid";
+import { mediaGarbageCollector } from "@/services/media-garbage-collector";
 
 export type UploadedFile = { url: string; storageKey: string; bytes: number; mimeType: string; width?: number; height?: number; durationMs?: number };
 
@@ -10,6 +11,7 @@ export async function uploadMediaFile(input: string | Blob, prefix = "file"): Pr
     const blob = typeof input === "string" ? await (await fetch(input)).blob() : input;
     const storageKey = `${prefix}:${nanoid()}`;
     await store.setItem(storageKey, blob);
+    await mediaGarbageCollector.protect(storageKey);
     const url = URL.createObjectURL(blob);
     objectUrls.set(storageKey, url);
     const meta = blob.type.startsWith("video/") ? await readVideoMeta(url) : blob.type.startsWith("audio/") ? await readAudioMeta(url) : {};
@@ -33,6 +35,7 @@ export async function getMediaBlob(storageKey: string) {
 
 export async function setMediaBlob(storageKey: string, blob: Blob) {
     await store.setItem(storageKey, blob);
+    await mediaGarbageCollector.protect(storageKey);
     const url = URL.createObjectURL(blob);
     objectUrls.set(storageKey, url);
     return url;
@@ -51,11 +54,13 @@ export async function deleteStoredMedia(keys: Iterable<string>) {
 
 export async function cleanupUnusedMedia(usedData: unknown) {
     const usedKeys = collectMediaStorageKeys(usedData);
-    const unused: string[] = [];
+    const storedKeys: string[] = [];
     await store.iterate((_value, key) => {
-        if (!usedKeys.has(key)) unused.push(key);
+        storedKeys.push(key);
     });
-    await Promise.all(unused.map((key) => store.removeItem(key)));
+    const deletions = await mediaGarbageCollector.findDeletions(storedKeys, usedKeys);
+    await deleteStoredMedia(deletions);
+    await mediaGarbageCollector.confirmDeleted(deletions);
 }
 
 export function collectMediaStorageKeys(value: unknown, keys = new Set<string>()) {

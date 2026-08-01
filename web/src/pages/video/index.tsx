@@ -1,7 +1,6 @@
 import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, LoaderCircle, Music2, Plus, SlidersHorizontal, Sparkles, Trash2, Upload, VideoIcon } from "lucide-react";
 import { useEffect, useRef, useState, type DragEvent } from "react";
 import { App, Button, Checkbox, Drawer, Empty, Input, Modal, Tag, Typography } from "antd";
-import localforage from "localforage";
 import { nanoid } from "nanoid";
 import { saveAs } from "file-saver";
 
@@ -12,8 +11,10 @@ import { VideoSettingsPanel, normalizeVideoResolutionValue, normalizeVideoSizeVa
 import { canvasThemes } from "@/lib/canvas-theme";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
 import { boolConfig, isSeedanceVideoConfig, normalizeSeedanceRatio, seedanceReferenceLabel, seedanceVideoReferenceError, seedanceVideoReferenceHint, SEEDANCE_REFERENCE_LIMITS, SEEDANCE_VIDEO_MIME_TYPES } from "@/lib/seedance-video";
-import { deleteStoredMedia, resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
+import { resolveMediaUrl, uploadMediaFile } from "@/services/file-storage";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
+import { flushAppDataPersistence } from "@/services/app-data-persistence-actions";
+import { filterDeletableGenerationLogIds, readStoredGenerationLogs, removeStoredGenerationLogs, setStoredGenerationLog } from "@/services/generation-log-storage";
 import { createVideoGenerationTask, pollVideoGenerationTask, storeGeneratedVideo, type VideoGenerationTask } from "@/services/api/video";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
@@ -66,8 +67,6 @@ type GenerationLogConfig = Pick<AiConfig, "model" | "videoModel" | "size" | "vqu
 type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
 
 const LOG_STORE_KEY = "infinite-canvas:video_generation_logs";
-const logStore = localforage.createInstance({ name: "infinite-canvas", storeName: "video_generation_logs" });
-
 export default function VideoPage() {
     const { message } = App.useApp();
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -79,6 +78,7 @@ export default function VideoPage() {
     const isAiConfigReady = useConfigStore((state) => state.isAiConfigReady);
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const addAsset = useAssetStore((state) => state.addAsset);
+    const cleanupAssetImages = useAssetStore((state) => state.cleanupImages);
     const [prompt, setPrompt] = useState("");
     const [references, setReferences] = useState<ReferenceImage[]>([]);
     const [videoReferences, setVideoReferences] = useState<ReferenceVideo[]>([]);
@@ -216,7 +216,19 @@ export default function VideoPage() {
             const errorMessage = error instanceof Error ? error.message : "生成失败";
             setResults([{ id: nanoid(), status: "failed", error: errorMessage }]);
             if (agentTaskId) updateAgentTask(agentTaskId, { status: "failed", successCount: 0, failCount: 1, error: errorMessage });
-            await saveLog(buildLog({ prompt: snapshot.text, model, config: snapshot.config, references: snapshot.references, videoReferences: snapshot.videoReferences, audioReferences: snapshot.audioReferences, durationMs: performance.now() - batchStartedAt, status: "失败", error: errorMessage }));
+            await saveLog(
+                buildLog({
+                    prompt: snapshot.text,
+                    model,
+                    config: snapshot.config,
+                    references: snapshot.references,
+                    videoReferences: snapshot.videoReferences,
+                    audioReferences: snapshot.audioReferences,
+                    durationMs: performance.now() - batchStartedAt,
+                    status: "失败",
+                    error: errorMessage,
+                }),
+            );
             message.error(errorMessage);
             setRunning(false);
         }
@@ -271,17 +283,22 @@ export default function VideoPage() {
         saveAs(video.url, "video.mp4");
     };
 
-    const saveResultToAssets = (video: GeneratedVideo) => {
-        addAsset({
-            kind: "video",
-            title: "生成视频",
-            coverUrl: "",
-            tags: [],
-            source: "视频创作台",
-            data: { url: video.url, storageKey: video.storageKey, width: video.width, height: video.height, bytes: video.bytes, mimeType: video.mimeType },
-            metadata: { source: "video-page", prompt },
-        });
-        message.success("已加入我的资产");
+    const saveResultToAssets = async (video: GeneratedVideo) => {
+        try {
+            addAsset({
+                kind: "video",
+                title: "生成视频",
+                coverUrl: "",
+                tags: [],
+                source: "视频创作台",
+                data: { url: video.url, storageKey: video.storageKey, width: video.width, height: video.height, bytes: video.bytes, mimeType: video.mimeType },
+                metadata: { source: "video-page", prompt },
+            });
+            await flushAppDataPersistence();
+            message.success("已加入我的资产");
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "资产保存失败");
+        }
     };
 
     const insertPickedAsset = async (payload: InsertAssetPayload) => {
@@ -308,22 +325,41 @@ export default function VideoPage() {
         setPreviewLog(null);
     };
 
-    const deleteSelectedLogs = () => {
-        const mediaKeys = logs
-            .filter((log) => selectedLogIds.includes(log.id))
-            .map((log) => log.video?.storageKey)
-            .filter((key): key is string => Boolean(key));
-        void Promise.all([deleteStoredMedia(mediaKeys), ...selectedLogIds.map((id) => logStore.removeItem(id))]).then(() => refreshLogs());
-        if (previewLog && selectedLogIds.includes(previewLog.id)) {
+    const deleteSelectedLogs = async () => {
+        const deletableIds = filterDeletableGenerationLogIds(logs, selectedLogIds);
+        if (!deletableIds.length) {
+            message.warning("正在生成的记录需等待任务结束后再删除");
+            setDeleteConfirmOpen(false);
+            return;
+        }
+        let deletedIds: Set<string>;
+        try {
+            deletedIds = new Set(await removeStoredGenerationLogs("video", deletableIds));
+            if (!deletedIds.size) {
+                message.warning("正在生成的记录需等待任务结束后再删除");
+                setDeleteConfirmOpen(false);
+                return;
+            }
+            await refreshLogs();
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "删除生成记录失败");
+            return;
+        }
+        if (previewLog && deletedIds.has(previewLog.id)) {
             setPreviewLog(null);
             setResults([]);
         }
         setSelectedLogIds([]);
         setDeleteConfirmOpen(false);
+        try {
+            await cleanupAssetImages({ references, videoReferences, audioReferences, results, previewLog: previewLog && !deletedIds.has(previewLog.id) ? previewLog : null });
+        } catch (error) {
+            message.warning(error instanceof Error ? `记录已删除，但媒体清理未完成：${error.message}` : "记录已删除，但媒体清理未完成");
+        }
     };
 
     const saveLog = async (log: GenerationLog, resumePending = true) => {
-        await logStore.setItem(log.id, serializeLog(log));
+        await setStoredGenerationLog("video", log.id, serializeLog(log));
         await refreshLogs(resumePending);
     };
 
@@ -407,7 +443,15 @@ export default function VideoPage() {
         <div className="flex h-full flex-col overflow-hidden bg-stone-50 text-stone-900 dark:bg-stone-950 dark:text-stone-100">
             <main className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-y-auto p-3 lg:grid-cols-[300px_minmax(0,1fr)] lg:overflow-hidden xl:grid-cols-[320px_minmax(0,1fr)]">
                 <aside className="thin-scrollbar hidden min-h-0 overflow-y-auto rounded-lg border border-stone-200 bg-card p-4 shadow-sm dark:border-stone-800 lg:block">
-                    <LogPanel logs={logs} selectedLogIds={selectedLogIds} activeLogId={previewLog?.id} onSelectedLogIdsChange={setSelectedLogIds} onCreateSession={createSession} onDeleteSelected={() => setDeleteConfirmOpen(true)} onPreviewLog={previewGenerationLog} />
+                    <LogPanel
+                        logs={logs}
+                        selectedLogIds={selectedLogIds}
+                        activeLogId={previewLog?.id}
+                        onSelectedLogIdsChange={setSelectedLogIds}
+                        onCreateSession={createSession}
+                        onDeleteSelected={() => setDeleteConfirmOpen(true)}
+                        onPreviewLog={previewGenerationLog}
+                    />
                 </aside>
 
                 <section className="grid gap-3 lg:min-h-0 lg:overflow-hidden xl:grid-cols-[420px_minmax(0,1fr)]">
@@ -467,7 +511,12 @@ export default function VideoPage() {
                                             <img src={item.dataUrl} alt={item.name} className="size-full object-cover" />
                                             <span className="absolute left-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">{seedanceReferenceLabel("image", index)}</span>
                                             <ReferenceOrderButtons index={index} total={references.length} onMove={(offset) => setReferences((value) => moveListItem(value, index, offset))} />
-                                            <button type="button" className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex" onClick={() => setReferences((value) => value.filter((ref) => ref.id !== item.id))} aria-label="移除参考图">
+                                            <button
+                                                type="button"
+                                                className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex"
+                                                onClick={() => setReferences((value) => value.filter((ref) => ref.id !== item.id))}
+                                                aria-label="移除参考图"
+                                            >
                                                 <Trash2 className="size-3.5" />
                                             </button>
                                         </div>
@@ -498,12 +547,19 @@ export default function VideoPage() {
                                             <video src={item.url} className="size-full object-cover" muted preload="metadata" />
                                             <span className="absolute left-1 top-1 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-medium text-white">{seedanceReferenceLabel("video", index)}</span>
                                             <ReferenceOrderButtons index={index} total={videoReferences.length} onMove={(offset) => setVideoReferences((value) => moveListItem(value, index, offset))} />
-                                            <button type="button" className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex" onClick={() => setVideoReferences((value) => value.filter((ref) => ref.id !== item.id))} aria-label="移除参考视频">
+                                            <button
+                                                type="button"
+                                                className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex"
+                                                onClick={() => setVideoReferences((value) => value.filter((ref) => ref.id !== item.id))}
+                                                aria-label="移除参考视频"
+                                            >
                                                 <Trash2 className="size-3.5" />
                                             </button>
                                         </div>
                                     ))}
-                                    {!videoReferences.length ? <div className="flex min-w-full items-center justify-center text-sm text-stone-500">{referenceDragTarget === "video" ? "松开即可上传参考资产" : "暂无参考视频，可拖入文件，最多 3 个"}</div> : null}
+                                    {!videoReferences.length ? (
+                                        <div className="flex min-w-full items-center justify-center text-sm text-stone-500">{referenceDragTarget === "video" ? "松开即可上传参考资产" : "暂无参考视频，可拖入文件，最多 3 个"}</div>
+                                    ) : null}
                                 </div>
                             </div>
 
@@ -533,12 +589,21 @@ export default function VideoPage() {
                                             </div>
                                             <audio src={item.url} controls className="h-8 w-full" preload="metadata" />
                                             <ReferenceOrderButtons index={index} total={audioReferences.length} onMove={(offset) => setAudioReferences((value) => moveListItem(value, index, offset))} />
-                                            <button type="button" className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex" onClick={() => setAudioReferences((value) => value.filter((ref) => ref.id !== item.id))} aria-label="移除参考音频">
+                                            <button
+                                                type="button"
+                                                className="absolute right-1 top-1 hidden size-6 items-center justify-center rounded bg-black/60 text-white group-hover:flex"
+                                                onClick={() => setAudioReferences((value) => value.filter((ref) => ref.id !== item.id))}
+                                                aria-label="移除参考音频"
+                                            >
                                                 <Trash2 className="size-3.5" />
                                             </button>
                                         </div>
                                     ))}
-                                    {!audioReferences.length ? <div className="flex min-w-full items-center justify-center text-center text-sm text-stone-500">{referenceDragTarget === "audio" ? "松开即可上传参考资产" : "暂无参考音频，可拖入文件，最多 3 个，mp3/wav，单个 15MB 内"}</div> : null}
+                                    {!audioReferences.length ? (
+                                        <div className="flex min-w-full items-center justify-center text-center text-sm text-stone-500">
+                                            {referenceDragTarget === "audio" ? "松开即可上传参考资产" : "暂无参考音频，可拖入文件，最多 3 个，mp3/wav，单个 15MB 内"}
+                                        </div>
+                                    ) : null}
                                 </div>
                             </div>
 
@@ -570,7 +635,15 @@ export default function VideoPage() {
                         </div>
                         {results.length ? (
                             <div className="grid gap-4">
-                                {results.map((result) => (result.status === "success" && result.video ? <ResultVideoCard key={result.id} video={result.video} onDownload={downloadVideo} onSaveAsset={saveResultToAssets} /> : result.status === "failed" ? <FailedVideoCard key={result.id} error={result.error || "生成失败"} onRetry={retryResult} /> : <PendingVideoCard key={result.id} />))}
+                                {results.map((result) =>
+                                    result.status === "success" && result.video ? (
+                                        <ResultVideoCard key={result.id} video={result.video} onDownload={downloadVideo} onSaveAsset={saveResultToAssets} />
+                                    ) : result.status === "failed" ? (
+                                        <FailedVideoCard key={result.id} error={result.error || "生成失败"} onRetry={retryResult} />
+                                    ) : (
+                                        <PendingVideoCard key={result.id} />
+                                    ),
+                                )}
                             </div>
                         ) : (
                             <div className="flex min-h-[320px] flex-col items-center justify-center rounded-lg border border-dashed border-stone-300 text-center dark:border-stone-700 lg:min-h-[560px]">
@@ -593,7 +666,15 @@ export default function VideoPage() {
                 }}
             />
             <Drawer title="生成记录" placement="bottom" size="large" open={logsOpen} onClose={() => setLogsOpen(false)}>
-                <LogPanel logs={logs} selectedLogIds={selectedLogIds} activeLogId={previewLog?.id} onSelectedLogIdsChange={setSelectedLogIds} onCreateSession={createSession} onDeleteSelected={() => setDeleteConfirmOpen(true)} onPreviewLog={previewGenerationLog} />
+                <LogPanel
+                    logs={logs}
+                    selectedLogIds={selectedLogIds}
+                    activeLogId={previewLog?.id}
+                    onSelectedLogIdsChange={setSelectedLogIds}
+                    onCreateSession={createSession}
+                    onDeleteSelected={() => setDeleteConfirmOpen(true)}
+                    onPreviewLog={previewGenerationLog}
+                />
             </Drawer>
             <Drawer title="参数" placement="bottom" height="82vh" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
                 <div className="grid grid-cols-2 gap-3 pb-4">
@@ -603,7 +684,7 @@ export default function VideoPage() {
             <PromptSelectDialog open={promptDialogOpen} onOpenChange={setPromptDialogOpen} onSelect={setPrompt} />
             <AssetPickerModal open={assetPickerOpen} defaultTab="my-assets" onInsert={(payload) => void insertPickedAsset(payload)} onClose={() => setAssetPickerOpen(false)} />
             <Modal title="删除生成记录" open={deleteConfirmOpen} onCancel={() => setDeleteConfirmOpen(false)} onOk={deleteSelectedLogs} okText="删除" okButtonProps={{ danger: true }} cancelText="取消">
-                确定删除选中的 {selectedLogIds.length} 条生成记录吗？
+                确定删除选中的 {filterDeletableGenerationLogIds(logs, selectedLogIds).length} 条已结束记录吗？
             </Modal>
         </div>
     );
@@ -696,8 +777,9 @@ function LogPanel({
     onDeleteSelected: () => void;
     onPreviewLog: (log: GenerationLog) => void;
 }) {
-    const allSelected = Boolean(logs.length) && selectedLogIds.length === logs.length;
-    const toggleAll = () => onSelectedLogIdsChange(allSelected ? [] : logs.map((log) => log.id));
+    const selectableLogIds = logs.filter((log) => log.status !== "生成中").map((log) => log.id);
+    const allSelected = Boolean(selectableLogIds.length) && selectableLogIds.every((id) => selectedLogIds.includes(id));
+    const toggleAll = () => onSelectedLogIdsChange(allSelected ? selectedLogIds.filter((id) => !selectableLogIds.includes(id)) : Array.from(new Set([...selectedLogIds, ...selectableLogIds])));
 
     return (
         <>
@@ -709,16 +791,24 @@ function LogPanel({
                 <Button size="small" icon={<Plus className="size-3.5" />} onClick={onCreateSession}>
                     新建
                 </Button>
-                <Button size="small" icon={<CheckSquare className="size-3.5" />} disabled={!logs.length} onClick={toggleAll}>
+                <Button size="small" icon={<CheckSquare className="size-3.5" />} disabled={!selectableLogIds.length} onClick={toggleAll}>
                     {allSelected ? "取消" : "全选"}
                 </Button>
-                <Button size="small" danger icon={<Trash2 className="size-3.5" />} disabled={!selectedLogIds.length} onClick={onDeleteSelected}>
+                <Button size="small" danger icon={<Trash2 className="size-3.5" />} disabled={!filterDeletableGenerationLogIds(logs, selectedLogIds).length} onClick={onDeleteSelected}>
                     删除
                 </Button>
             </div>
             <div className="space-y-3">
                 {logs.map((log) => (
-                    <LogCard key={log.id} log={log} selected={selectedLogIds.includes(log.id)} active={activeLogId === log.id} onSelectedChange={(checked) => onSelectedLogIdsChange(checked ? [...selectedLogIds, log.id] : selectedLogIds.filter((id) => id !== log.id))} onClick={() => onPreviewLog(log)} />
+                    <LogCard
+                        key={log.id}
+                        log={log}
+                        selected={selectedLogIds.includes(log.id)}
+                        selectable={log.status !== "生成中"}
+                        active={activeLogId === log.id}
+                        onSelectedChange={(checked) => onSelectedLogIdsChange(checked ? [...selectedLogIds, log.id] : selectedLogIds.filter((id) => id !== log.id))}
+                        onClick={() => onPreviewLog(log)}
+                    />
                 ))}
                 {!logs.length ? <div className="flex min-h-48 items-center justify-center rounded-lg border border-dashed border-stone-300 text-center text-sm text-stone-500 dark:border-stone-700">暂无生成记录</div> : null}
             </div>
@@ -726,11 +816,15 @@ function LogPanel({
     );
 }
 
-function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: GenerationLog; selected: boolean; active: boolean; onSelectedChange: (checked: boolean) => void; onClick: () => void }) {
+function LogCard({ log, selected, selectable, active, onSelectedChange, onClick }: { log: GenerationLog; selected: boolean; selectable: boolean; active: boolean; onSelectedChange: (checked: boolean) => void; onClick: () => void }) {
     return (
-        <button type="button" className={`block w-full rounded-lg border p-2 text-left transition ${active ? "border-stone-900 bg-blue-50 dark:border-stone-100 dark:bg-blue-950/20" : "border-stone-200 bg-background hover:bg-stone-50 dark:border-stone-800 dark:hover:bg-stone-900"}`} onClick={onClick}>
+        <button
+            type="button"
+            className={`block w-full rounded-lg border p-2 text-left transition ${active ? "border-stone-900 bg-blue-50 dark:border-stone-100 dark:bg-blue-950/20" : "border-stone-200 bg-background hover:bg-stone-50 dark:border-stone-800 dark:hover:bg-stone-900"}`}
+            onClick={onClick}
+        >
             <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2">
-                <Checkbox className="mt-0.5" checked={selected} onClick={(event) => event.stopPropagation()} onChange={(event) => onSelectedChange(event.target.checked)} />
+                <Checkbox className="mt-0.5" checked={selected} disabled={!selectable} onClick={(event) => event.stopPropagation()} onChange={(event) => onSelectedChange(event.target.checked)} />
                 <div className="min-w-0">
                     <div className="truncate text-sm font-semibold leading-5">{log.title}</div>
                     <div className="mt-2 flex flex-wrap gap-1">
@@ -755,10 +849,7 @@ function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: Ge
 async function readStoredLogs() {
     if (typeof window === "undefined") return [];
     try {
-        const logs: GenerationLog[] = [];
-        await logStore.iterate<GenerationLog, void>((value) => {
-            logs.push(value);
-        });
+        const logs = (await readStoredGenerationLogs("video")) as GenerationLog[];
         return (await Promise.all(logs.map(normalizeLog))).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
     } catch {
         return [];
@@ -872,7 +963,31 @@ function normalizeLogConfig(log: Partial<GenerationLog>): GenerationLogConfig {
     };
 }
 
-function buildLog({ prompt, model, config, references, videoReferences, audioReferences, durationMs, status, task, video, error }: { prompt: string; model: string; config: AiConfig; references: ReferenceImage[]; videoReferences: ReferenceVideo[]; audioReferences: ReferenceAudio[]; durationMs: number; status: GenerationLog["status"]; task?: VideoGenerationTask; video?: GeneratedVideo; error?: string }): GenerationLog {
+function buildLog({
+    prompt,
+    model,
+    config,
+    references,
+    videoReferences,
+    audioReferences,
+    durationMs,
+    status,
+    task,
+    video,
+    error,
+}: {
+    prompt: string;
+    model: string;
+    config: AiConfig;
+    references: ReferenceImage[];
+    videoReferences: ReferenceVideo[];
+    audioReferences: ReferenceAudio[];
+    durationMs: number;
+    status: GenerationLog["status"];
+    task?: VideoGenerationTask;
+    video?: GeneratedVideo;
+    error?: string;
+}): GenerationLog {
     const logConfig = {
         model: config.model,
         videoModel: config.videoModel,

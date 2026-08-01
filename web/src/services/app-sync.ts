@@ -1,8 +1,8 @@
-import localforage from "localforage";
-
 import { getMediaBlob, resolveMediaUrl, setMediaBlob } from "@/services/file-storage";
+import { mergeStoredGenerationLogs, readStoredGenerationLogs } from "@/services/generation-log-storage";
 import { getImageBlob, resolveImageUrl, setImageBlob } from "@/services/image-storage";
 import { downloadWebdavFile, uploadWebdavFile, WEBDAV_MANIFEST_FILE_NAME } from "@/services/webdav-sync";
+import { flushAppDataPersistence } from "@/services/app-data-persistence-actions";
 import type { Asset } from "@/stores/use-asset-store";
 import { useAssetStore } from "@/stores/use-asset-store";
 import type { WebdavSyncConfig } from "@/stores/use-config-store";
@@ -38,7 +38,7 @@ type SyncDomainOptions<T> = {
     localData: () => Promise<T>;
     emptyData: T;
     mergeData: (local: T, remote: T) => T;
-    applyData?: (data: T) => Promise<void>;
+    applyData?: (data: T) => Promise<T>;
 };
 
 type SyncDomainResult<T> = {
@@ -75,9 +75,6 @@ export type AppSyncProgressEvent = {
 export type AppSyncProgress = (event: AppSyncProgressEvent) => void;
 
 const FILE_CONCURRENCY = 3;
-const imageLogStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_generation_logs" });
-const videoLogStore = localforage.createInstance({ name: "infinite-canvas", storeName: "video_generation_logs" });
-type LogStore = typeof imageLogStore;
 const storageKeyPattern = /^(image|video|audio|file|video-reference|audio-reference):/;
 
 export async function syncAppDataToWebdav(config: WebdavSyncConfig, onProgress?: AppSyncProgress): Promise<AppSyncResult> {
@@ -91,7 +88,12 @@ export async function syncAppDataToWebdav(config: WebdavSyncConfig, onProgress?:
             emptyData: { projects: [] },
             localData: async () => ({ projects: useCanvasStore.getState().projects }),
             mergeData: (local, remote) => ({ projects: mergeById(local.projects, remote.projects, "updatedAt") }),
-            applyData: async (data) => useCanvasStore.getState().replaceProjects(data.projects),
+            applyData: async (data) => {
+                const applied = { projects: mergeById(useCanvasStore.getState().projects, data.projects, "updatedAt") };
+                useCanvasStore.getState().replaceProjects(applied.projects);
+                await flushAppDataPersistence();
+                return applied;
+            },
         }),
         syncDomain<AssetDomainData>(config, onProgress, {
             key: "assets",
@@ -99,23 +101,28 @@ export async function syncAppDataToWebdav(config: WebdavSyncConfig, onProgress?:
             emptyData: { assets: [] },
             localData: async () => ({ assets: useAssetStore.getState().assets }),
             mergeData: (local, remote) => ({ assets: mergeById(local.assets, remote.assets, "updatedAt") }),
-            applyData: async (data) => useAssetStore.getState().replaceAssets(await Promise.all(data.assets.map(hydrateAsset))),
+            applyData: async (data) => {
+                const applied = { assets: mergeById(useAssetStore.getState().assets, data.assets, "updatedAt") };
+                useAssetStore.getState().replaceAssets(await Promise.all(applied.assets.map(hydrateAsset)));
+                await flushAppDataPersistence();
+                return applied;
+            },
         }),
         syncDomain<LogDomainData>(config, onProgress, {
             key: "image-workbench",
             label: "生图工作台",
             emptyData: { logs: [] },
-            localData: async () => ({ logs: await readStoredLogs(imageLogStore) }),
+            localData: async () => ({ logs: (await readStoredGenerationLogs("image")) as StoredLog[] }),
             mergeData: (local, remote) => ({ logs: mergeById(local.logs, remote.logs, "createdAt") }),
-            applyData: async (data) => replaceStoredLogs(imageLogStore, data.logs),
+            applyData: async (data) => ({ logs: (await mergeStoredGenerationLogs("image", data.logs)) as StoredLog[] }),
         }),
         syncDomain<LogDomainData>(config, onProgress, {
             key: "video-workbench",
             label: "视频创作台",
             emptyData: { logs: [] },
-            localData: async () => ({ logs: await readStoredLogs(videoLogStore) }),
+            localData: async () => ({ logs: (await readStoredGenerationLogs("video")) as StoredLog[] }),
             mergeData: (local, remote) => ({ logs: mergeById(local.logs, remote.logs, "createdAt") }),
-            applyData: async (data) => replaceStoredLogs(videoLogStore, data.logs),
+            applyData: async (data) => ({ logs: (await mergeStoredGenerationLogs("video", data.logs)) as StoredLog[] }),
         }),
     ]);
 
@@ -141,13 +148,13 @@ async function syncDomain<T>(config: WebdavSyncConfig, onProgress: AppSyncProgre
         const remoteManifest = await readDomainManifest(config, options.key, options.emptyData);
         emitProgress(onProgress, { domain: options.key, label: options.label, stage: "读取本地数据", status: "active" });
         const localData = await options.localData();
-        const mergedData = remoteManifest ? options.mergeData(localData, remoteManifest.data) : localData;
+        let mergedData = remoteManifest ? options.mergeData(localData, remoteManifest.data) : localData;
 
         if (remoteManifest) {
             emitProgress(onProgress, { domain: options.key, label: options.label, stage: "下载缺失媒体", status: "active" });
             await downloadMissingFiles(config, options.key, mergedData, remoteManifest.files, onProgress);
             emitProgress(onProgress, { domain: options.key, label: options.label, stage: "写入本地合并结果", status: "active" });
-            await options.applyData?.(mergedData);
+            if (options.applyData) mergedData = await options.applyData(mergedData);
         }
 
         emitProgress(onProgress, { domain: options.key, label: options.label, stage: "上传新增媒体", status: "active" });
@@ -273,22 +280,6 @@ async function hydrateAsset(asset: Asset): Promise<Asset> {
         return { ...asset, coverUrl: asset.coverUrl.startsWith("blob:") ? url : asset.coverUrl, data: { ...asset.data, url } };
     }
     return asset;
-}
-
-async function readStoredLogs(store: LogStore) {
-    const logs: StoredLog[] = [];
-    await store.iterate<StoredLog, void>((value) => {
-        if (value && typeof value === "object") logs.push(value);
-    });
-    return logs;
-}
-
-async function replaceStoredLogs(store: LogStore, logs: StoredLog[]) {
-    await store.clear();
-    await runWithConcurrency(logs, FILE_CONCURRENCY, async (log) => {
-        const id = getStringField(log, "id");
-        if (id) await store.setItem(id, log);
-    });
 }
 
 function mergeById<T extends { id?: string }>(local: T[], remote: T[], timeKey: string) {

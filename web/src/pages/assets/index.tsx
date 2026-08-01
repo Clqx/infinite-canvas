@@ -6,6 +6,7 @@ import { saveAs } from "file-saver";
 import { useCopyText } from "@/hooks/use-copy-text";
 import { formatBytes, readFileAsDataUrl } from "@/lib/image-utils";
 import { uploadImage } from "@/services/image-storage";
+import { flushAppDataPersistence } from "@/services/app-data-persistence-actions";
 import { cn } from "@/lib/utils";
 import { useAssetStore, type Asset, type AssetKind, type ImageAsset } from "@/stores/use-asset-store";
 import { exportAssets, readAssetPackage } from "./asset-transfer";
@@ -40,6 +41,7 @@ export default function AssetsPage() {
     const addAsset = useAssetStore((state) => state.addAsset);
     const updateAsset = useAssetStore((state) => state.updateAsset);
     const removeAsset = useAssetStore((state) => state.removeAsset);
+    const cleanupImages = useAssetStore((state) => state.cleanupImages);
     const [keyword, setKeyword] = useState("");
     const [kindFilter, setKindFilter] = useState<AssetKind | "all">("all");
     const [page, setPage] = useState(1);
@@ -122,8 +124,13 @@ export default function AssetsPage() {
             editingAsset ? updateAsset(editingAsset.id, asset) : addAsset(asset);
         }
 
-        message.success(editingAsset ? "资产已更新" : "资产已保存");
-        setIsAssetOpen(false);
+        try {
+            await flushAppDataPersistence();
+            message.success(editingAsset ? "资产已更新" : "资产已保存");
+            setIsAssetOpen(false);
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "资产保存失败");
+        }
     };
 
     const readCoverFile = async (file?: File) => {
@@ -170,19 +177,26 @@ export default function AssetsPage() {
                 delete payload.updatedAt;
                 addAsset(payload as Parameters<typeof addAsset>[0]);
             });
+            await flushAppDataPersistence();
             message.success(`已导入 ${importedAssets.length} 个资产`);
-        } catch {
-            message.error("导入失败，请选择有效的资产压缩包");
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "导入失败，请选择有效的资产压缩包");
         } finally {
             if (assetInputRef.current) assetInputRef.current.value = "";
         }
     };
 
-    const confirmDelete = () => {
+    const confirmDelete = async () => {
         if (!deletingAsset) return;
         removeAsset(deletingAsset.id);
-        message.success("资产已删除");
-        setDeletingAsset(null);
+        try {
+            await flushAppDataPersistence();
+            message.success("资产已删除");
+            setDeletingAsset(null);
+            void cleanupImages().catch(() => undefined);
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "资产删除未能保存");
+        }
     };
 
     return (
@@ -248,11 +262,7 @@ export default function AssetsPage() {
                                 >
                                     导入资产
                                 </button>
-                                <button
-                                    type="button"
-                                    className="cursor-pointer text-sm font-medium text-stone-700 underline-offset-4 hover:underline focus-visible:outline-none focus-visible:underline dark:text-stone-300"
-                                    onClick={openCreate}
-                                >
+                                <button type="button" className="cursor-pointer text-sm font-medium text-stone-700 underline-offset-4 hover:underline focus-visible:outline-none focus-visible:underline dark:text-stone-300" onClick={openCreate}>
                                     新增资产
                                 </button>
                             </div>
@@ -395,7 +405,7 @@ export default function AssetsPage() {
 
             <input ref={assetInputRef} type="file" accept="application/zip,.zip" className="hidden" onChange={(event) => void importAssetZip(event.target.files?.[0])} />
 
-            <Modal title="删除资产" open={Boolean(deletingAsset)} onCancel={() => setDeletingAsset(null)} onOk={confirmDelete} okText="删除" okButtonProps={{ danger: true }} cancelText="取消">
+            <Modal title="删除资产" open={Boolean(deletingAsset)} onCancel={() => setDeletingAsset(null)} onOk={() => void confirmDelete()} okText="删除" okButtonProps={{ danger: true }} cancelText="取消">
                 确定删除「{deletingAsset?.title}」吗？删除后会从我的资产中移除。
             </Modal>
         </div>

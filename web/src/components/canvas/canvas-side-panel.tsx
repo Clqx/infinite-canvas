@@ -12,6 +12,7 @@ import { PromptDetailDialog } from "@/pages/prompts/components/prompt-detail-dia
 import { fetchSourcePrompts, type Prompt } from "@/services/api/prompts";
 import { uploadMediaFile } from "@/services/file-storage";
 import { uploadImage } from "@/services/image-storage";
+import { flushAppDataPersistence } from "@/services/app-data-persistence-actions";
 import { useAssetStore, type Asset, type AssetKind } from "@/stores/use-asset-store";
 import { usePromptSourceStore } from "@/stores/use-prompt-source-store";
 import { CANVAS_SIDE_PANEL_MAX_WIDTH, CANVAS_SIDE_PANEL_MIN_WIDTH, CANVAS_SIDE_PANEL_MOTION_MS, useCanvasSidePanelStore } from "@/stores/use-canvas-side-panel-store";
@@ -231,7 +232,13 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, th
                                     </button>
                                     {selectMode || !isImage ? null : (
                                         <div className="flex shrink-0 flex-col items-center gap-0.5 pr-1.5">
-                                            <button type="button" onClick={() => onPreviewNode(node.id)} className="grid size-7 place-items-center rounded-md opacity-55 transition hover:bg-black/10 hover:opacity-100 dark:hover:bg-white/10" aria-label="放大预览" title="放大预览">
+                                            <button
+                                                type="button"
+                                                onClick={() => onPreviewNode(node.id)}
+                                                className="grid size-7 place-items-center rounded-md opacity-55 transition hover:bg-black/10 hover:opacity-100 dark:hover:bg-white/10"
+                                                aria-label="放大预览"
+                                                title="放大预览"
+                                            >
                                                 <Eye className="size-3.5" />
                                             </button>
                                         </div>
@@ -295,6 +302,7 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ onInsert, theme }: { onI
     const assets = useAssetStore((state) => state.assets);
     const addAsset = useAssetStore((state) => state.addAsset);
     const removeAsset = useAssetStore((state) => state.removeAsset);
+    const cleanupImages = useAssetStore((state) => state.cleanupImages);
     const [keyword, setKeyword] = useState("");
     const [tagFilter, setTagFilter] = useState<string>("all");
     const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
@@ -328,6 +336,7 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ onInsert, theme }: { onI
                     added += 1;
                 }
             }
+            if (added) await flushAppDataPersistence();
             if (added) message.success(`已添加 ${added} 个资产`);
             else message.warning("仅支持图片或视频文件");
         } catch (error) {
@@ -337,6 +346,17 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ onInsert, theme }: { onI
             hide();
             setUploading(false);
             if (fileInputRef.current) fileInputRef.current.value = "";
+        }
+    };
+
+    const removeSavedAsset = async (id: string) => {
+        removeAsset(id);
+        try {
+            await flushAppDataPersistence();
+            message.success("资产已移除");
+            void cleanupImages().catch(() => undefined);
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "资产移除未能保存");
         }
     };
 
@@ -388,7 +408,7 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ onInsert, theme }: { onI
                                     {isCollapsed ? null : (
                                         <div className="grid grid-cols-2 gap-2 px-1 pb-2 pt-1">
                                             {group.items.map((asset) => (
-                                                <AssetCard key={asset.id} asset={asset} theme={theme} onInsert={() => onInsert(buildInsertPayload(asset))} onRemove={() => (removeAsset(asset.id), message.success("资产已移除"))} />
+                                                <AssetCard key={asset.id} asset={asset} theme={theme} onInsert={() => onInsert(buildInsertPayload(asset))} onRemove={() => void removeSavedAsset(asset.id)} />
                                             ))}
                                         </div>
                                     )}
@@ -468,19 +488,23 @@ const CanvasPromptsTab = memo(function CanvasPromptsTab({ onInsert, theme }: { o
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
                 <div className="space-y-1">
-                    {enabledSources.length ? enabledSources.map((source) => (
-                        <PromptSourceGroup
-                            key={source.id}
-                            sourceId={source.id}
-                            sourceName={source.name}
-                            keyword={keyword}
-                            open={!!expanded[source.id]}
-                            theme={theme}
-                            onToggle={() => setExpanded((prev) => ({ ...prev, [source.id]: !prev[source.id] }))}
-                            onInsert={onInsert}
-                            onView={setDetail}
-                        />
-                    )) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无提示词" className="pt-12" />}
+                    {enabledSources.length ? (
+                        enabledSources.map((source) => (
+                            <PromptSourceGroup
+                                key={source.id}
+                                sourceId={source.id}
+                                sourceName={source.name}
+                                keyword={keyword}
+                                open={!!expanded[source.id]}
+                                theme={theme}
+                                onToggle={() => setExpanded((prev) => ({ ...prev, [source.id]: !prev[source.id] }))}
+                                onInsert={onInsert}
+                                onView={setDetail}
+                            />
+                        ))
+                    ) : (
+                        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无提示词" className="pt-12" />
+                    )}
                 </div>
             </div>
             <PromptDetailDialog prompt={detail} onClose={() => setDetail(null)} onCopy={(prompt) => void copyPrompt(prompt)} />

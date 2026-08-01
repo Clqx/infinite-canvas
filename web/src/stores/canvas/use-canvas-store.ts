@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { persist, type PersistStorage, type StorageValue } from "zustand/middleware";
 
 import { nanoid } from "nanoid";
-import { localForageStorage } from "@/lib/localforage-storage";
+import { CANVAS_STATE_STORAGE_KEY, canvasStateStorage } from "@/services/app-data-persistence";
 import type { CanvasBackgroundMode } from "@/lib/canvas-theme";
 import type { CanvasAssistantSession, CanvasConnection, CanvasNodeData, ViewportTransform } from "@/types/canvas";
 
@@ -33,30 +33,14 @@ type CanvasStore = {
 };
 
 const initialViewport: ViewportTransform = { x: 0, y: 0, k: 1 };
-const CANVAS_STORE_KEY = "infinite-canvas:canvas_store";
-type PersistedCanvasState = Pick<CanvasStore, "projects">;
-let saveTimer: ReturnType<typeof setTimeout> | null = null;
-let queuedPersistState: PersistedCanvasState | null = null;
-
 const canvasStorage: PersistStorage<CanvasStore> = {
     getItem: async (name) => {
-        const value = await localForageStorage.getItem(name);
+        const value = await canvasStateStorage.getItem(name);
         if (!value) return null;
-        const parsed = JSON.parse(value) as StorageValue<CanvasStore>;
-        queuedPersistState = parsed.state as PersistedCanvasState;
-        return parsed;
+        return JSON.parse(value) as StorageValue<CanvasStore>;
     },
-    setItem: (name, value) => {
-        const nextState = value.state as PersistedCanvasState;
-        if (queuedPersistState && queuedPersistState.projects === nextState.projects) return;
-        queuedPersistState = nextState;
-        if (saveTimer) clearTimeout(saveTimer);
-        saveTimer = setTimeout(() => {
-            saveTimer = null;
-            void localForageStorage.setItem(name, JSON.stringify(value));
-        }, 400);
-    },
-    removeItem: (name) => localForageStorage.removeItem(name),
+    setItem: (name, value) => canvasStateStorage.setItem(name, JSON.stringify(value)),
+    removeItem: (name) => canvasStateStorage.removeItem(name),
 };
 
 export const useCanvasStore = create<CanvasStore>()(
@@ -120,14 +104,20 @@ export const useCanvasStore = create<CanvasStore>()(
                 })),
         }),
         {
-            name: CANVAS_STORE_KEY,
+            name: CANVAS_STATE_STORAGE_KEY,
             storage: canvasStorage,
+            version: 1,
+            migrate: (state) => ({ projects: Array.isArray((state as Partial<CanvasStore> | undefined)?.projects) ? (state as Partial<CanvasStore>).projects : [] }) as CanvasStore,
             partialize: (state) =>
                 ({
                     projects: state.projects,
                 }) as StorageValue<CanvasStore>["state"],
-            onRehydrateStorage: () => () => {
-                useCanvasStore.setState({ hydrated: true });
+            onRehydrateStorage: () => (_state, error) => {
+                if (error) {
+                    if (canvasStateStorage.markHydrationError(error)) useCanvasStore.setState({ hydrated: false });
+                    return;
+                }
+                if (canvasStateStorage.markHydrated()) useCanvasStore.setState({ hydrated: true });
             },
         },
     ),
