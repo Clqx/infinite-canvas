@@ -4,6 +4,8 @@ declare const __APP_VERSION__: string;
 declare const __APP_RELEASES__: import("@/lib/release").ReleaseInfo[];
 
 interface ImportMetaEnv {
+    // 仅本地开发可显式开启；动态插件和自定义模型脚本可读取页面内凭据。
+    readonly VITE_UNSAFE_EXTENSIONS?: "1";
     // 逗号分隔的本地开发插件 URL,每次启动重新拉取(不缓存、不落库)
     readonly VITE_DEV_PLUGINS?: string;
     // 统计分析（可选，构建期注入）：每家一个独立变量，填了谁就启用谁，可同时启用多家

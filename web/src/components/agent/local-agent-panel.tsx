@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { App, Button, Tooltip } from "antd";
 import dayjs from "dayjs";
 import { Bot, History, MessageSquare, PanelRightClose, PlugZap, Plus, Terminal } from "lucide-react";
@@ -11,12 +11,14 @@ import { readImageMeta } from "@/lib/image-utils";
 import { randomId } from "@/lib/utils";
 import { uploadImage } from "@/services/image-storage";
 import { deleteAgentThreadMessages, readAgentUserMessages, saveAgentUserMessage } from "@/services/agent-chat-storage";
+import { AgentEventSource } from "@/services/agent-event-source";
+import { clearAgentBootstrap, peekAgentBootstrap } from "@/lib/security/bootstrap-secrets";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useShallow } from "zustand/react/shallow";
 import { useAgentStore, type AgentCanvasContext, type AgentChatItem, type AgentModel, type AgentPendingApproval, type AgentPendingToolCall, type AgentPermissionMode, type AgentReasoningEffort, type AgentThreadSummary } from "@/stores/use-agent-store";
 import { summarizeCanvasAgentOps, type CanvasAgentOp, type CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
 import { isSiteTool, runSiteTool } from "@/lib/agent/agent-site-tools";
-import { activateAgentClient, discoverAgentConfig, fetchAgentJson, postCodexApproval, postState, postToolResult } from "./agent-api";
+import { activateAgentClient, discoverAgentConfig, fetchAgent, fetchAgentJson, postCodexApproval, postState, postToolResult } from "./agent-api";
 import { AgentChatTimeline, AgentTaskProgress, AgentUsageBar } from "./agent-chat";
 import { AgentChatComposer } from "./agent-chat-composer";
 import { AgentConnectView } from "./agent-connect-view";
@@ -76,13 +78,38 @@ type AgentChatEvent = { threadId?: string; sourceClientId?: string; message?: Ag
 export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?: boolean; headless?: boolean; autoConnect?: boolean }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const { message, modal } = App.useApp();
-    const [searchParams] = useSearchParams();
     const navigate = useNavigate();
     // 逐字段 selector + useShallow：只有这些字段变化时才重渲染。
     // 注意：canvasContext 不在此订阅内 —— 它在拖拽/resize 时会被 project 每帧写入，
     // 但面板只在 ref 同步与防抖 postState 中用到它、渲染层从不读它。若把它放进订阅，
     // 面板会随画布每帧重渲染（性能问题，也是 #185 崩溃的放大器）。改为下方 subscribe 命令式监听。
-    const { width, url, token, connected, enabled, prompt, attachments, sending, waiting, tokenUsage, eventLogs, threads, activeThreadId, workspacePath, loadingThreads, activeTab, confirmTools, permissionMode, models, model, reasoningEffort, activity, connectError, pendingTool, pendingApprovals } = useAgentStore(
+    const {
+        width,
+        url,
+        token,
+        connected,
+        enabled,
+        prompt,
+        attachments,
+        sending,
+        waiting,
+        tokenUsage,
+        eventLogs,
+        threads,
+        activeThreadId,
+        workspacePath,
+        loadingThreads,
+        activeTab,
+        confirmTools,
+        permissionMode,
+        models,
+        model,
+        reasoningEffort,
+        activity,
+        connectError,
+        pendingTool,
+        pendingApprovals,
+    } = useAgentStore(
         useShallow((state) => ({
             width: state.width,
             url: state.url,
@@ -128,32 +155,35 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
     const loadThreadsSequenceRef = useRef(0);
     const resetThreadRef = useRef<Promise<unknown> | null>(null);
     const endpoint = useMemo(() => url.trim().replace(/\/$/, ""), [url]);
-    const urlAgentAutoConnect = searchParams.has("agentUrl") && searchParams.has("agentToken");
-    const loadThreads = useCallback(async (skipHistory = false) => {
-        if (!connectedRef.current && !useAgentStore.getState().connected) return;
-        const sequence = ++loadThreadsSequenceRef.current;
-        setAgentState({ loadingThreads: true });
-        try {
-            const currentThreadId = useAgentStore.getState().activeThreadId;
-            const currentThreadRequest = currentThreadId && !skipHistory ? fetchAgentJson<AgentThreadResponse>(endpoint, token, `/agent/codex/threads/${encodeURIComponent(currentThreadId)}`).catch(() => null) : null;
-            const storedMessagesRequest = currentThreadId && !skipHistory ? readAgentUserMessages(currentThreadId) : null;
-            const data = await fetchAgentJson<AgentThreadsResponse>(endpoint, token, `/agent/codex/threads`);
-            let nextMessages: AgentChatItem[] = [];
-            if (currentThreadId && !skipHistory) {
-                let thread = await currentThreadRequest;
-                thread ||= await fetchAgentJson<AgentThreadResponse>(endpoint, token, `/agent/codex/threads/${encodeURIComponent(currentThreadId)}`);
-                const storedMessages = (await storedMessagesRequest) || [];
-                const currentMessages = useAgentStore.getState().messages;
-                nextMessages = mergeHistoryMessages(mergeHistoryAttachments(normalizeHistoryMessages(thread.messages || []), [...storedMessages, ...currentMessages]), currentMessages);
+    const urlAgentAutoConnect = Boolean(peekAgentBootstrap());
+    const loadThreads = useCallback(
+        async (skipHistory = false) => {
+            if (!connectedRef.current && !useAgentStore.getState().connected) return;
+            const sequence = ++loadThreadsSequenceRef.current;
+            setAgentState({ loadingThreads: true });
+            try {
+                const currentThreadId = useAgentStore.getState().activeThreadId;
+                const currentThreadRequest = currentThreadId && !skipHistory ? fetchAgentJson<AgentThreadResponse>(endpoint, token, `/agent/codex/threads/${encodeURIComponent(currentThreadId)}`).catch(() => null) : null;
+                const storedMessagesRequest = currentThreadId && !skipHistory ? readAgentUserMessages(currentThreadId) : null;
+                const data = await fetchAgentJson<AgentThreadsResponse>(endpoint, token, `/agent/codex/threads`);
+                let nextMessages: AgentChatItem[] = [];
+                if (currentThreadId && !skipHistory) {
+                    let thread = await currentThreadRequest;
+                    thread ||= await fetchAgentJson<AgentThreadResponse>(endpoint, token, `/agent/codex/threads/${encodeURIComponent(currentThreadId)}`);
+                    const storedMessages = (await storedMessagesRequest) || [];
+                    const currentMessages = useAgentStore.getState().messages;
+                    nextMessages = mergeHistoryMessages(mergeHistoryAttachments(normalizeHistoryMessages(thread.messages || []), [...storedMessages, ...currentMessages]), currentMessages);
+                }
+                if (sequence !== loadThreadsSequenceRef.current) return;
+                setAgentState({ threads: data.data || [], workspacePath: data.workspace?.workspacePath || "", ...(skipHistory ? {} : { messages: nextMessages }) });
+            } catch (error) {
+                addEventLog("读取历史失败", error);
+            } finally {
+                if (sequence === loadThreadsSequenceRef.current) setAgentState({ loadingThreads: false });
             }
-            if (sequence !== loadThreadsSequenceRef.current) return;
-            setAgentState({ threads: data.data || [], workspacePath: data.workspace?.workspacePath || "", ...(skipHistory ? {} : { messages: nextMessages }) });
-        } catch (error) {
-            addEventLog("读取历史失败", error);
-        } finally {
-            if (sequence === loadThreadsSequenceRef.current) setAgentState({ loadingThreads: false });
-        }
-    }, [endpoint, setAgentState, token]);
+        },
+        [endpoint, setAgentState, token],
+    );
     // canvasContext 命令式订阅：保持 ref 最新，并在快照变化时防抖上报，全程不触发面板重渲染。
     useEffect(() => {
         let timer: ReturnType<typeof setTimeout> | null = null;
@@ -179,19 +209,25 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
 
     useEffect(() => {
         if (!enabled || !token.trim()) return;
-        localStorage.setItem("canvas-agent-url", endpoint);
-        localStorage.setItem("canvas-agent-token", token);
         const clientId = clientIdRef.current;
         let eventQueue = Promise.resolve();
         const enqueueEvent = (task: () => void | Promise<void>) => {
             eventQueue = eventQueue.then(task).catch((error) => addEventLog("同步会话失败", error));
         };
-        const source = new EventSource(`${endpoint}/events?token=${encodeURIComponent(token)}&clientId=${encodeURIComponent(clientId)}`);
+        const source = new AgentEventSource(endpoint, token, clientId);
         source.addEventListener("hello", (event) => {
             const busy = Boolean(parseEventData<AgentHelloEvent>(event)?.codex?.busy);
             errorLoggedRef.current = false;
             connectedRef.current = true;
-            setAgentState({ connected: true, activity: busy ? "Codex 正在运行" : "已连接", waiting: busy, sending: false, connectError: "", silentConnect: false, messages: useAgentStore.getState().messages.filter((item) => !isConnectionErrorMessage(item)) });
+            setAgentState({
+                connected: true,
+                activity: busy ? "Codex 正在运行" : "已连接",
+                waiting: busy,
+                sending: false,
+                connectError: "",
+                silentConnect: false,
+                messages: useAgentStore.getState().messages.filter((item) => !isConnectionErrorMessage(item)),
+            });
             if (!headless) message.success("本地 Agent 已连接");
             void postState(endpoint, token, clientId, canvasContextRef.current?.snapshot || null);
             if (document.visibilityState === "visible" && document.hasFocus()) void activateAgentClient(endpoint, token, clientId);
@@ -221,9 +257,10 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
         });
         source.addEventListener("agent_event", (event) => {
             const data = parseEventData<AgentEventPayload>(event);
-            if (data) enqueueEvent(() => {
-                if (isCurrentThreadEvent(data)) handleAgentEvent(data);
-            });
+            if (data)
+                enqueueEvent(() => {
+                    if (isCurrentThreadEvent(data)) handleAgentEvent(data);
+                });
         });
         source.addEventListener("workspace_changed", (event) => {
             const data = parseEventData<AgentWorkspaceEvent>(event);
@@ -286,26 +323,28 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
 
     useEffect(() => {
         if (!connected) return;
-        void fetchAgentJson<AgentModelsResponse>(endpoint, token, "/agent/codex/models").then(({ data = [] }) => {
-            const names = new Set<string>();
-            const models = data.flatMap((item) => {
-                const name = item.displayName || item.model;
-                const efforts = item.supportedReasoningEfforts.filter(({ reasoningEffort }) => AGENT_REASONING_EFFORTS.has(reasoningEffort));
-                if (item.model === "codex-auto-review" || names.has(name) || !efforts.length) return [];
-                names.add(name);
-                const defaultReasoningEffort = efforts.some((effort) => effort.reasoningEffort === item.defaultReasoningEffort) ? item.defaultReasoningEffort : efforts[0].reasoningEffort;
-                return [{ ...item, supportedReasoningEfforts: efforts, defaultReasoningEffort }];
-            });
-            if (!models.length) return;
-            const savedModel = useAgentStore.getState().model;
-            const current = models.find((item) => item.model === savedModel) || models.find((item) => item.isDefault) || models[0];
-            const savedEffort = useAgentStore.getState().reasoningEffort;
-            const efforts = current.supportedReasoningEfforts.map((item) => item.reasoningEffort);
-            const nextEffort = efforts.includes(savedEffort as AgentReasoningEffort) ? savedEffort as AgentReasoningEffort : current.defaultReasoningEffort || efforts[0];
-            localStorage.setItem("canvas-agent-model", current.model);
-            localStorage.setItem("canvas-agent-reasoning-effort", nextEffort);
-            setAgentState({ models, model: current.model, reasoningEffort: nextEffort });
-        }).catch((error) => addEventLog("读取模型列表失败", error));
+        void fetchAgentJson<AgentModelsResponse>(endpoint, token, "/agent/codex/models")
+            .then(({ data = [] }) => {
+                const names = new Set<string>();
+                const models = data.flatMap((item) => {
+                    const name = item.displayName || item.model;
+                    const efforts = item.supportedReasoningEfforts.filter(({ reasoningEffort }) => AGENT_REASONING_EFFORTS.has(reasoningEffort));
+                    if (item.model === "codex-auto-review" || names.has(name) || !efforts.length) return [];
+                    names.add(name);
+                    const defaultReasoningEffort = efforts.some((effort) => effort.reasoningEffort === item.defaultReasoningEffort) ? item.defaultReasoningEffort : efforts[0].reasoningEffort;
+                    return [{ ...item, supportedReasoningEfforts: efforts, defaultReasoningEffort }];
+                });
+                if (!models.length) return;
+                const savedModel = useAgentStore.getState().model;
+                const current = models.find((item) => item.model === savedModel) || models.find((item) => item.isDefault) || models[0];
+                const savedEffort = useAgentStore.getState().reasoningEffort;
+                const efforts = current.supportedReasoningEfforts.map((item) => item.reasoningEffort);
+                const nextEffort = efforts.includes(savedEffort as AgentReasoningEffort) ? (savedEffort as AgentReasoningEffort) : current.defaultReasoningEffort || efforts[0];
+                localStorage.setItem("canvas-agent-model", current.model);
+                localStorage.setItem("canvas-agent-reasoning-effort", nextEffort);
+                setAgentState({ models, model: current.model, reasoningEffort: nextEffort });
+            })
+            .catch((error) => addEventLog("读取模型列表失败", error));
     }, [connected, endpoint, setAgentState, token]);
 
     useEffect(() => {
@@ -387,7 +426,7 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
         if (!connected || (!sending && !waiting)) return;
         setAgentState({ activity: "停止中" });
         try {
-            await fetch(`${endpoint}/agent/codex/interrupt?token=${encodeURIComponent(token)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ threadId: useAgentStore.getState().activeThreadId || undefined }) });
+            await fetchAgent(`${endpoint}/agent/codex/interrupt`, token, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ threadId: useAgentStore.getState().activeThreadId || undefined }) });
             addEventLog("停止任务", "已发送停止请求");
         } catch {
             setAgentState({ activity: "停止失败" });
@@ -549,8 +588,9 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
             clearAgentSession({ enabled: false, connected: false, activity: "离线", connectError: "" });
             return;
         }
-        const urlToken = searchParams.get("agentToken") || "";
-        const urlEndpoint = searchParams.get("agentUrl") || "";
+        const bootstrap = peekAgentBootstrap();
+        const urlToken = bootstrap?.token || "";
+        const urlEndpoint = bootstrap?.url || "";
         const discovered = urlToken ? null : await discoverAgentConfig(endpoint || DEFAULT_AGENT_URL);
         const nextEndpoint = (urlEndpoint || discovered?.url || endpoint || DEFAULT_AGENT_URL).trim().replace(/\/$/, "");
         const nextToken = (urlToken || token.trim() || discovered?.token || "").trim();
@@ -582,18 +622,15 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
             return;
         }
         errorLoggedRef.current = false;
+        if (bootstrap) clearAgentBootstrap();
         setAgentState({ url: nextEndpoint, token: nextToken, enabled: true, connected: false, silentConnect: silent, activity: "连接中", connectError: "", activeTab: "setup" });
     };
 
     useEffect(() => {
-        if (urlAgentAutoConnect && confirmTools) setAgentState({ confirmTools: false });
-    }, [confirmTools, setAgentState, urlAgentAutoConnect]);
-
-    useEffect(() => {
-        if (!autoConnect || autoConnectRef.current || enabled || connected) return;
+        if ((!autoConnect && !urlAgentAutoConnect) || autoConnectRef.current || enabled || connected) return;
         autoConnectRef.current = true;
         void toggleAgentConnection({ silent: true });
-    }, [autoConnect, connected, enabled]);
+    }, [autoConnect, connected, enabled, urlAgentAutoConnect]);
 
     function clearAgentSession(patch: Parameters<typeof setAgentState>[0] = {}) {
         loadThreadsSequenceRef.current += 1;
@@ -623,9 +660,11 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
             throw error;
         });
         resetThreadRef.current = request;
-        void request.finally(() => {
-            if (resetThreadRef.current === request) resetThreadRef.current = null;
-        }).catch(() => undefined);
+        void request
+            .finally(() => {
+                if (resetThreadRef.current === request) resetThreadRef.current = null;
+            })
+            .catch(() => undefined);
     };
 
     const resumeThread = async (threadId: string) => {
@@ -638,7 +677,13 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                 readAgentUserMessages(threadId),
             ]);
             const localMessages = current.activeThreadId === threadId ? current.messages : [];
-            setAgentState({ activeThreadId: data.thread?.id || threadId, messages: mergeHistoryAttachments(normalizeHistoryMessages(data.messages || []), [...storedMessages, ...localMessages]), tokenUsage: null, activeTab: "chat", activity: "已恢复会话" });
+            setAgentState({
+                activeThreadId: data.thread?.id || threadId,
+                messages: mergeHistoryAttachments(normalizeHistoryMessages(data.messages || []), [...storedMessages, ...localMessages]),
+                tokenUsage: null,
+                activeTab: "chat",
+                activity: "已恢复会话",
+            });
         } catch (error) {
             addEventLog("恢复对话失败", error);
             message.error(error instanceof Error ? error.message : "恢复对话失败");
@@ -919,7 +964,16 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                 />
             ) : (
                 <>
-                    <AgentChatTimeline theme={theme} pendingTool={pendingTool} pendingApprovals={pendingApprovals} sending={sending} waiting={waiting} onRejectTool={rejectPendingTool} onApproveTool={approvePendingTool} onApprovalDecision={decideApproval} />
+                    <AgentChatTimeline
+                        theme={theme}
+                        pendingTool={pendingTool}
+                        pendingApprovals={pendingApprovals}
+                        sending={sending}
+                        waiting={waiting}
+                        onRejectTool={rejectPendingTool}
+                        onApproveTool={approvePendingTool}
+                        onApprovalDecision={decideApproval}
+                    />
                     <AgentTaskProgress theme={theme} busy={sending || waiting} />
                     {tokenUsage ? <AgentUsageBar usage={tokenUsage} theme={theme} /> : null}
                     <AgentChatComposer
@@ -979,7 +1033,7 @@ async function attachmentNodeOps(endpoint: string, token: string, clientId: stri
             const id = String(item.id || "");
             const attachmentId = String(item.attachmentId || "");
             if (!id || !attachmentId) throw new Error("图片附件节点参数无效");
-            const res = await fetch(`${endpoint}/agent/attachments/${encodeURIComponent(attachmentId)}?token=${encodeURIComponent(token)}&clientId=${encodeURIComponent(clientId)}`);
+            const res = await fetchAgent(`${endpoint}/agent/attachments/${encodeURIComponent(attachmentId)}?clientId=${encodeURIComponent(clientId)}`, token);
             if (!res.ok) {
                 const body = (await res.json().catch(() => null)) as { error?: string } | null;
                 throw new Error(body?.error || "读取图片附件失败");
@@ -1013,9 +1067,7 @@ async function importGeneratedImages(endpoint: string, token: string, item: Agen
     const sources = Array.from(generatedImageSources(item));
     return await Promise.all(
         sources.map(async (source, index) => {
-            const response = source.startsWith("data:image/")
-                ? await fetch(source)
-                : await fetch(`${endpoint}/agent/local-image?token=${encodeURIComponent(token)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: source }) });
+            const response = source.startsWith("data:image/") ? await fetch(source) : await fetchAgent(`${endpoint}/agent/local-image`, token, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: source }) });
             if (!response.ok) throw new Error("读取 Codex 生成图片失败");
             const blob = await response.blob();
             const upload = await uploadImage(blob);

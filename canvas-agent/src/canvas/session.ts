@@ -71,7 +71,7 @@ export class CanvasSession {
         const clientId = url.searchParams.get("clientId") || crypto.randomUUID();
         const statusOnly = url.searchParams.get("role") === "status";
         logger.info("SSE client connected", { clientId, statusOnly });
-        res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
+        res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store", Connection: "keep-alive" });
         if (!statusOnly) {
             this.clients.set(clientId, res);
             if (!this.clientFocusOrder.has(clientId)) this.clientFocusOrder.set(clientId, 0);

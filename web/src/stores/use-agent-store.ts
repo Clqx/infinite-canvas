@@ -23,10 +23,6 @@ export type AgentThreadSummary = { id: string; preview: string; name?: string | 
 export type AgentTokenUsage = { input: number; cached: number; output: number };
 export type AgentPanelTab = "chat" | "setup" | "history" | "log";
 
-const CONNECT_TIMEOUT_MS = 6000;
-let agentSource: EventSource | null = null;
-let connectTimer: ReturnType<typeof setTimeout> | null = null;
-
 type AgentStore = {
     width: number;
     panelOpen: boolean;
@@ -79,8 +75,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     panelMounted: true,
     panelClosing: false,
     canvasContext: null,
-    url: typeof window === "undefined" ? "http://127.0.0.1:17371" : localStorage.getItem("canvas-agent-url") || "http://127.0.0.1:17371",
-    token: typeof window === "undefined" ? "" : localStorage.getItem("canvas-agent-token") || "",
+    url: "http://127.0.0.1:17371",
+    token: "",
     connected: false,
     enabled: false,
     silentConnect: false,
@@ -127,16 +123,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         } catch {
             return set({ connectError: silent ? "" : "Local URL 格式不正确" });
         }
-        localStorage.setItem("canvas-agent-url", endpoint);
-        localStorage.setItem("canvas-agent-token", token);
         // 只设 enabled=true，由 LocalAgentPanel 的 useEffect 统一负责开 SSE
         set({ url: endpoint, token, enabled: true, silentConnect: silent, activity: "连接中", connectError: "" });
     },
     disconnectAgent: (patch = {}) => {
-        agentSource?.close();
-        agentSource = null;
-        if (connectTimer) clearTimeout(connectTimer);
-        connectTimer = null;
         set({ enabled: false, connected: false, silentConnect: false, activity: "离线", ...patch });
     },
     addMessage: (item) => set((state) => ({ messages: [...state.messages.slice(-120), item] })),

@@ -49,8 +49,8 @@
 - 画布助手：围绕选中节点和上游节点对话、生图，并把结果插回画布。
 - 本地 Agent：通过本机 Canvas Agent 连接 Codex / Claude Code，让 Agent 通过 MCP 操作当前画布；
 - Codex App 插件：提供 Codex app 插件，安装后会自动注册 MCP 并尝试拉起本地 Agent。
-- 插件系统：支持通过 URL 动态安装 / 启用 / 更新 / 卸载远程节点插件，并提供 TypeScript SDK 自行开发画布节点插件。
-- 自定义接口调用：可自定义生图 / 视频接口的调用方式，灵活适配各类中转站与自建服务。
+- 插件系统：提供 TypeScript SDK 开发画布节点插件；动态远程插件只允许在显式开启不安全扩展的本地开发环境运行。
+- 自定义接口调用：本地开发环境可显式启用自定义生图 / 视频调用脚本，适配中转站与自建服务。
 - 提示词库：浏览器前端直连多个 GitHub 开源项目，并缓存到 IndexedDB。
 
 完整功能说明见 [功能介绍](docs/content/docs/overview/features.mdx)。
@@ -59,7 +59,7 @@
 
 ## 快速开始
 
-AI API Key、Base URL、画布、素材和生成记录默认保存在浏览器本地。
+AI API Key、Base URL、画布、素材和生成记录默认保存在浏览器本地；凭据使用用户设置的本地密码加密，画布与媒体保持独立存储。
 
 ### 本地开发
 
@@ -76,14 +76,16 @@ bun run dev
 ```bash
 git clone git@github.com:basketikun/infinite-canvas.git
 cd infinite-canvas
+export AUTH_USERNAME=canvas
+export AUTH_PASSWORD="$(openssl rand -base64 24)"
 docker compose up -d
 ```
 
-运行后默认端口3000，可访问 `http://localhost:3000`。
+生产 Docker 默认启用单用户入口鉴权并只绑定 `127.0.0.1`，用户名只能包含字母、数字、点、下划线和连字符，密码必须为 12–72 字节。缺少或无效凭据时容器会拒绝启动。运行后访问 `http://localhost:3000`，使用上面设置的凭据登录；公网访问必须经过 HTTPS 反向代理，密码文件和部署方式见 [Docker 部署文档](docs/content/docs/overview/docker.mdx)。
 
-首次打开后进入右上角配置，填入自己的 OpenAI 兼容 `Base URL` 和 `API Key`。
+首次打开先创建本地凭据保险库，再进入右上角配置，填入自己的 OpenAI 兼容 `Base URL` 和 `API Key`。
 
-如果默认的OpenAI接口调用方式与您的API不同，可自定义生图/视频脚本调用。
+如果默认接口调用方式与 API 不同，可在受信任的本地开发环境显式启用自定义生图/视频脚本调用。
 
 ## 效果展示
 

@@ -2,12 +2,14 @@ import { registerNodeDefinitions, unregisterPluginNodes } from "@/lib/canvas/nod
 import { getPluginRuntime } from "@/lib/canvas/plugin-runtime";
 import { usePluginStore, type InstalledPlugin } from "@/stores/canvas/use-plugin-store";
 import type { CanvasPlugin } from "@/types/canvas-plugin";
+import { assertUnsafeExtensionsEnabled, unsafeExtensionsEnabled } from "@/lib/security/runtime-mode";
 
 const cleanups = new Map<string, () => void>();
 
 // 远程插件默认导出可以是 CanvasPlugin,或接收 runtime 返回 CanvasPlugin 的工厂
 // (工厂形式用 runtime.React,无需 bundle 自带 React)
 async function evaluatePluginSource(source: string): Promise<CanvasPlugin> {
+    assertUnsafeExtensionsEnabled();
     const blob = new Blob([source], { type: "text/javascript" });
     const url = URL.createObjectURL(blob);
     try {
@@ -59,6 +61,7 @@ function withCacheBust(url: string) {
 // bustCache=true 时下载绕过 HTTP/CDN 缓存(升级场景必需,避免拿到旧产物),
 // 但落库的 url 始终保持干净(不带 ?t=),便于后续再次更新。
 export async function installPluginFromUrl(url: string, opts?: { official?: boolean; bustCache?: boolean }) {
+    assertUnsafeExtensionsEnabled();
     const source = await fetchPluginSource(opts?.bustCache ? withCacheBust(url) : url);
     const plugin = await evaluatePluginSource(source);
     deactivatePlugin(plugin.id); // 覆盖旧版本
@@ -73,6 +76,7 @@ export async function updatePlugin(record: InstalledPlugin) {
 }
 
 export async function setPluginEnabled(record: InstalledPlugin, enabled: boolean) {
+    if (enabled) assertUnsafeExtensionsEnabled();
     usePluginStore.getState().setEnabled(record.id, enabled);
     if (!enabled) {
         deactivatePlugin(record.id);
@@ -95,6 +99,7 @@ let loaded = false;
 export async function ensurePluginsLoaded() {
     if (loaded) return;
     loaded = true;
+    if (!unsafeExtensionsEnabled) return;
     await usePluginStore.persist.rehydrate();
     await loadLocalPlugins(); // 先发现本地插件(默认关闭),再统一按 enabled 激活
     const records = usePluginStore.getState().plugins.filter((record) => record.enabled);

@@ -6,6 +6,8 @@ import { App, ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
 
 import { ClientRootInit } from "@/components/layout/client-root-init";
+import { LocalVaultGate } from "@/components/auth/local-vault-gate";
+import { VaultSaveFailureNotifier } from "@/components/auth/vault-save-failure-notifier";
 import { getAntThemeConfig } from "@/lib/app-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 
@@ -32,8 +34,11 @@ export function AppProviders({ children }: { children: ReactNode }) {
         <ConfigProvider locale={zhCN} theme={getAntThemeConfig(dark)}>
             <ProConfigProvider dark={dark}>
                 <App>
+                    <VaultSaveFailureNotifier />
                     <QueryClientProvider client={queryClient}>
-                        <ClientRootInit>{children}</ClientRootInit>
+                        <LocalVaultGate>
+                            <ClientRootInit>{children}</ClientRootInit>
+                        </LocalVaultGate>
                     </QueryClientProvider>
                 </App>
             </ProConfigProvider>

@@ -5,11 +5,24 @@ import { useEffect, useRef, useState } from "react";
 import { ModelPicker } from "@/components/model-picker";
 import { ChannelEditorDrawer } from "@/components/layout/channel-editor-drawer";
 import { ConfigPromptSources } from "@/components/layout/config-prompt-sources";
-import { exportAppConfig, importAppConfig } from "@/services/config-file";
+import { VaultSecurityPanel } from "@/components/auth/vault-security-panel";
+import { applyAppConfig, exportAppConfig, readAppConfig } from "@/services/config-file";
 import { syncAppDataToWebdav, type AppSyncDomainKey, type AppSyncProgressEvent } from "@/services/app-sync";
 import { testWebdavConnection, WEBDAV_MANIFEST_FILE_NAME } from "@/services/webdav-sync";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
-import { createModelChannel, modelOptionsFromChannels, normalizeModelOptionValue, selectableModelsByCapability, useConfigStore, type AiConfig, type ApiCallFormat, type ConfigTabKey, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
+import {
+    createModelChannel,
+    modelOptionsFromChannels,
+    normalizeModelOptionValue,
+    selectableModelsByCapability,
+    useConfigStore,
+    type AiConfig,
+    type ApiCallFormat,
+    type ConfigTabKey,
+    type ModelCapability,
+    type ModelChannel,
+} from "@/stores/use-config-store";
+import { useAuthStore } from "@/stores/use-auth-store";
 
 type ModelGroup = {
     capability: ModelCapability;
@@ -66,6 +79,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     const shouldPromptContinue = useConfigStore((state) => state.shouldPromptContinue);
     const setConfigDialogOpen = useConfigStore((state) => state.setConfigDialogOpen);
     const clearPromptContinue = useConfigStore((state) => state.clearPromptContinue);
+    const flushCredentials = useAuthStore((state) => state.flush);
     const webdavReady = Boolean(webdav.url.trim());
     const editingChannel = config.channels.find((channel) => channel.id === editingChannelId) || null;
     useEffect(() => setActiveTab(initialTab), [initialTab]);
@@ -74,17 +88,25 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
         (Object.keys(nextConfig) as Array<keyof AiConfig>).forEach((key) => updateConfig(key, nextConfig[key]));
     };
 
-    const finishConfig = () => {
+    const finishConfig = async () => {
         const ready = config.channels.some((channel) => channel.baseUrl.trim() && channel.apiKey.trim() && channel.models.length);
-        setConfigDialogOpen(false);
-        if (!ready) return;
-        message.success(shouldPromptContinue ? "配置已保存，请继续刚才的请求" : "配置已保存");
-        clearPromptContinue();
+        try {
+            await flushCredentials();
+            setConfigDialogOpen(false);
+            if (!ready) return;
+            message.success(shouldPromptContinue ? "配置已保存，请继续刚才的请求" : "配置已保存");
+            clearPromptContinue();
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "配置保存失败");
+        }
     };
 
     const loadConfigFile = async (file: File) => {
         try {
-            await importAppConfig(file);
+            const imported = await readAppConfig(file);
+            if (imported.hasPlaintextSensitiveData && !(await confirmPlaintextConfigImport())) return;
+            applyAppConfig(imported.data);
+            await flushCredentials();
             message.success("配置与用户偏好已导入");
         } catch (error) {
             message.error(error instanceof Error ? error.message : "配置文件读取失败");
@@ -167,7 +189,7 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     return (
         <>
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-200 pb-3 dark:border-stone-800">
-                <div className="text-xs text-stone-500">JSON 文件包含 API Key 和 WebDAV 凭据，请妥善保管。</div>
+                <div className="text-xs text-stone-500">普通 JSON 备份不包含 API Key、WebDAV 凭据或自定义调用脚本。</div>
                 <div className="flex gap-2">
                     <Button icon={<Upload className="size-4" />} onClick={() => configInputRef.current?.click()}>
                         导入配置
@@ -315,11 +337,16 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                             </Form>
                         ),
                     },
+                    {
+                        key: "security",
+                        label: "安全",
+                        children: <VaultSecurityPanel />,
+                    },
                 ]}
             />
             {showDoneButton ? (
                 <div className="mt-4 flex justify-end">
-                    <Button type="primary" onClick={finishConfig}>
+                    <Button type="primary" onClick={() => void finishConfig()}>
                         完成
                     </Button>
                 </div>
@@ -327,6 +354,19 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
             <ChannelEditorDrawer open={Boolean(editingChannel)} channel={editingChannel} onSave={saveChannel} onClose={() => setEditingChannelId("")} />
         </>
     );
+}
+
+function confirmPlaintextConfigImport() {
+    return new Promise<boolean>((resolve) => {
+        Modal.confirm({
+            title: "导入明文敏感配置？",
+            content: "该文件包含 API Key、WebDAV 凭据或自定义调用脚本。确认来源可信后再导入；导入后内容会写入当前已解锁的加密保险库。",
+            okText: "确认导入",
+            cancelText: "取消",
+            onOk: () => resolve(true),
+            onCancel: () => resolve(false),
+        });
+    });
 }
 
 export function AppConfigModal() {

@@ -1,0 +1,14 @@
+# Runtime-only test image for environments where the Bun build image is unavailable.
+# Build web/dist first; production images must still use the repository Dockerfile.
+FROM nginx:1.27-alpine
+
+RUN apk add --no-cache apache2-utils
+
+COPY web/dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY web/docker-entrypoint.sh /usr/local/bin/infinite-canvas-entrypoint.sh
+RUN sed -i 's/\r$//' /usr/local/bin/infinite-canvas-entrypoint.sh \
+    && chmod +x /usr/local/bin/infinite-canvas-entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/infinite-canvas-entrypoint.sh"]
+CMD ["nginx", "-g", "daemon off;"]

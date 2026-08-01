@@ -12,7 +12,7 @@ description: 前端优先的本地开发方式
 ```bash
 cd web
 bun install
-bun run dev
+bun run dev -- --host 127.0.0.1
 ```
 
 前端默认访问：
@@ -20,6 +20,8 @@ bun run dev
 ```text
 http://localhost:3000
 ```
+
+Vite 开发服务器不提供入口鉴权，因此本地开发应显式绑定 `127.0.0.1`。只有在受信任的隔离网络中确有跨设备调试需求时，才使用项目脚本默认的 `0.0.0.0` 监听方式；对外提供服务请使用启用鉴权的生产 Docker 镜像。
 
 ## 2. 配置模型
 

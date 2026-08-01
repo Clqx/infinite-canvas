@@ -344,7 +344,7 @@ export function isReadTool(name: string) {
     return name === "canvas_get_state" || name === "canvas_get_selection" || name === "canvas_export_snapshot";
 }
 
-function isMcpToolItem(item?: AgentEventItem) {
+function isMcpToolItem(item?: AgentEventItem): item is AgentEventItem {
     return item?.type === "mcp_tool_call";
 }
 

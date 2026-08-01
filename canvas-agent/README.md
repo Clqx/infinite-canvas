@@ -34,9 +34,13 @@ Connect token: xxxxxx
 
 在画布右上角点击 `Agent`，填入地址和 token 后连接。
 
-Codex app 插件会读取启动输出里的 Local URL 和 Connect token，并直接打开画布网页地址；Canvas Agent 不负责生成画布打开 URL。
+Codex app 插件会读取启动输出里的 Local URL 和 Connect token，并直接打开画布网页地址；Canvas Agent 不负责生成画布打开 URL。生成自动连接地址时，token 必须放在 URL fragment，不能放在查询参数：
 
-Canvas Agent 默认只监听 `127.0.0.1`。网页第一次带正确 token 连接后，Canvas Agent 会记录该网页 Origin；之后其他 Origin 不能复用这个本地 Agent，除非用户清理 `~/.infinite-canvas/canvas-agent.json` 里的 `origins`。
+```text
+https://canvas.best/canvas?mode=new#agentUrl=http%3A%2F%2F127.0.0.1%3A17371&agentToken=<encoded Connect token>
+```
+
+Canvas Agent 默认只监听 `127.0.0.1`。网页请求使用 `X-Canvas-Agent-Token` header 鉴权，查询参数中的 token 会被拒绝。网页第一次带正确 token 连接后，Canvas Agent 会记录该网页 Origin；之后其他 Origin 不能复用这个本地 Agent，除非用户清理 `~/.infinite-canvas/canvas-agent.json` 里的 `origins`。
 
 ## 发布
 

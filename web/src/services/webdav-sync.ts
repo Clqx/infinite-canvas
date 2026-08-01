@@ -77,7 +77,7 @@ async function webdavFetch(config: WebdavSyncConfig, path: string, init: Request
     const timer = window.setTimeout(() => controller.abort(), WEBDAV_REQUEST_TIMEOUT_MS);
     try {
         const url = buildWebdavUrl(config, path);
-        return await fetch(url, { ...init, headers, signal: controller.signal });
+        return await fetch(url, { ...init, headers, signal: controller.signal, credentials: "omit", redirect: "error", referrerPolicy: "no-referrer", cache: "no-store" });
     } catch (error) {
         if (error instanceof Error && error.name === "AbortError") throw new Error("WebDAV 请求超时，请检查网络或远端服务状态");
         if (error instanceof TypeError) throw new Error("无法连接 WebDAV，请检查地址、HTTPS 证书、CORS 或网络状态");
@@ -100,6 +100,14 @@ function normalizePath(path: string) {
 
 function assertWebdavConfig(config: WebdavSyncConfig) {
     if (!config.url.trim()) throw new Error("请先填写 WebDAV 地址");
+    let url: URL;
+    try {
+        url = new URL(config.url);
+    } catch {
+        throw new Error("WebDAV 地址格式不正确");
+    }
+    const loopback = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+    if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) throw new Error("WebDAV 必须使用 HTTPS；仅本机回环地址允许 HTTP");
 }
 
 async function throwWebdavError(response: Response, fallback: string): Promise<never> {

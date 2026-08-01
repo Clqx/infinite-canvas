@@ -33,15 +33,16 @@ Please include:
 
 ### Canvas node plugins
 
-The canvas supports third-party node plugins loaded from a remote URL. By
-design, an installed plugin's code runs directly inside the web app with full
-access to the page, including locally stored data such as AI API keys. This is
-an intentional trade-off for extensibility, and the installer shows a warning
-before installing. Therefore:
+Production builds disable third-party node plugins and custom model scripts.
+Developers can opt into these features only in a local development build with
+`VITE_UNSAFE_EXTENSIONS=1`. In that mode, installed plugin and script code runs
+directly inside the web app with full access to the page, including unlocked
+credentials. Therefore:
 
 - Only install plugins from sources you trust.
-- Reports that a *malicious plugin* can access page data or API keys are **out
-  of scope** — that is the documented behavior of the trust model.
+- Reports that opted-in *malicious plugin code* can access page data or API
+  keys are **out of scope** — that is the documented behavior of this local
+  development trust model.
 - Reports **in scope** include: the app loading/executing plugin code without
   the install confirmation, a plugin escaping its declared node type to break
   core app integrity in ways not implied by "runs in the page", or the plugin

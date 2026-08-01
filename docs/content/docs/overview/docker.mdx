@@ -5,13 +5,15 @@ description: 使用 Docker Compose 部署无限画布
 
 # Docker 部署
 
-如果你希望在自己的机器或服务器上运行项目，可以直接使用 Docker Compose。
+如果你希望在自己的机器或服务器上运行项目，可以直接使用 Docker Compose。主应用镜像默认启用 Nginx 单用户入口鉴权并只绑定宿主机 `127.0.0.1`，所有静态资源和单页应用深层路由都会受到保护；缺少有效凭据时容器会拒绝启动。
 
 ## 使用发布镜像
 
 ```bash
 git clone git@github.com:basketikun/infinite-canvas.git
 cd infinite-canvas
+export AUTH_USERNAME=canvas
+export AUTH_PASSWORD="$(openssl rand -base64 24)"
 docker compose up -d
 ```
 
@@ -21,6 +23,37 @@ docker compose up -d
 http://localhost:3000
 ```
 
+浏览器会显示 HTTP Basic Auth 登录框。`AUTH_USERNAME` 必须为 1–64 个 ASCII 字母、数字、点、下划线或连字符，且以字母或数字开头；`AUTH_PASSWORD` 必须为 12–72 字节。bcrypt 最多安全处理 72 字节，因此更长密码会被拒绝，而不是被静默截断。
+
+也可以复制 `.env.example` 为 `.env` 后填写这两个值。默认 `IMAGE_NAME` 指向当前 `Clqx/infinite-canvas` fork 的镜像；使用其他 fork 时应改为对应的 GHCR 包和不可变版本 tag。不要提交 `.env`，也不要使用示例或公开密码。
+
+## 使用密码文件
+
+在共享主机或长期部署中，推荐通过只读文件提供密码，避免把密码留在容器进程环境中：
+
+```bash
+umask 077
+openssl rand -base64 24 > ../infinite-canvas-auth-password
+
+docker run -d --name infinite-canvas \
+  -p 3000:3000 \
+  -e AUTH_MODE=required \
+  -e AUTH_USERNAME=canvas \
+  -e AUTH_PASSWORD_FILE=/run/secrets/infinite-canvas-password \
+  --mount type=bind,src="$(realpath ../infinite-canvas-auth-password)",dst=/run/secrets/infinite-canvas-password,readonly \
+  ghcr.io/clqx/infinite-canvas:latest
+```
+
+`AUTH_PASSWORD` 与 `AUTH_PASSWORD_FILE` 只能设置一个。密码文件可以带一个结尾换行，但不能包含多行内容。容器只把 bcrypt hash 写入内部 `htpasswd`，不会把明文写进生成的网页配置或访问日志。
+
+<Callout type="warn">
+HTTP Basic Auth 只编码凭据，不负责传输加密。需要通过局域网以外的网络访问时，必须在容器前配置 HTTPS 反向代理；不要直接把 3000 端口暴露到公网。
+</Callout>
+
+默认 Compose 只发布到 `127.0.0.1:3000`，适合由同一宿主机上的 HTTPS 反向代理访问。只有确认 TLS 入口已经就绪时，才可在 `.env` 中显式设置 `APP_BIND_ADDRESS=0.0.0.0`；不要直接通过明文 HTTP 公开该端口。
+
+镜像会发送限制脚本来源的 CSP、`no-store`、`nosniff`、禁止嵌入和 HSTS 等响应头。HSTS 只有经 HTTPS 访问时才会被浏览器采用，因此它不能替代反向代理的 TLS 配置。
+
 ## 本地构建镜像
 
 如果需要基于当前源码构建镜像：
@@ -28,6 +61,8 @@ http://localhost:3000
 ```bash
 docker compose -f docker-compose.local.yml up -d --build
 ```
+
+该本地 Compose 明确设置 `AUTH_MODE=disabled`，同时只把端口绑定到 `127.0.0.1`。镜像还要求 `AUTH_ALLOW_INSECURE_LOOPBACK=1` 才允许关闭鉴权；这个开关只是防误用，容器无法自行验证宿主机的端口发布范围，因此不要把禁用模式复制到其他 Compose 或公网部署。
 
 ## 文档站镜像
 
@@ -49,7 +84,7 @@ docker compose -f docker-compose.local.yml up -d --build
 
 ## 数据说明
 
-当前主应用镜像只启动 Next.js。画布、我的素材、生成记录和 AI API Key 默认保存在浏览器本地；第三方提示词由浏览器前端直连拉取，不需要额外挂载数据目录。
+当前主应用镜像只启动 Nginx 静态站点。画布、我的素材和生成记录保存在浏览器本地；AI、WebDAV 和 Agent 凭据在首次使用时由本地密码加密后独立存储。第三方提示词由浏览器前端直连拉取，不需要额外挂载数据目录。启用或轮换入口密码不会改变站点 origin，也不会迁移或删除这些浏览器数据。
 
 ## 统计分析（可选）
 
@@ -67,10 +102,13 @@ docker compose -f docker-compose.local.yml up -d --build
 ```yaml
 services:
   app:
-    image: ghcr.io/basketikun/infinite-canvas:latest
+    image: ghcr.io/clqx/infinite-canvas:latest
     ports:
       - "3000:3000"
     environment:
+      AUTH_MODE: required
+      AUTH_USERNAME: canvas
+      AUTH_PASSWORD: 请换成随机生成的密码
       ANALYTICS_GA4_ID: G-XXXXXXXXXX
       ANALYTICS_BAIDU_ID: e8263761cc5c32f5f7a855b8203b965a
 ```
@@ -79,9 +117,12 @@ services:
 
 ```bash
 docker run -d -p 3000:3000 \
+  -e AUTH_MODE=required \
+  -e AUTH_USERNAME=canvas \
+  -e AUTH_PASSWORD="$(openssl rand -base64 24)" \
   -e ANALYTICS_GA4_ID=G-XXXXXXXXXX \
   -e ANALYTICS_BAIDU_ID=e8263761cc5c32f5f7a855b8203b965a \
-  ghcr.io/basketikun/infinite-canvas:latest
+  ghcr.io/clqx/infinite-canvas:latest
 ```
 
 单页应用的路由切换会自动向所有已启用的统计上报 pageview。
