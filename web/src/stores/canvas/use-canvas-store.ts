@@ -3,6 +3,7 @@ import { persist, type PersistStorage, type StorageValue } from "zustand/middlew
 
 import { nanoid } from "nanoid";
 import { CANVAS_STATE_STORAGE_KEY, canvasStateStorage } from "@/services/app-data-persistence";
+import { addTombstones, migrateCanvasData, type SyncTombstone } from "@/services/app-data-schema";
 import type { CanvasBackgroundMode } from "@/lib/canvas-theme";
 import type { CanvasAssistantSession, CanvasConnection, CanvasNodeData, ViewportTransform } from "@/types/canvas";
 
@@ -23,12 +24,13 @@ export type CanvasProject = {
 type CanvasStore = {
     hydrated: boolean;
     projects: CanvasProject[];
+    projectTombstones: SyncTombstone[];
     createProject: (title?: string) => string;
     importProject: (project: Partial<CanvasProject>) => string;
     openProject: (id: string) => CanvasProject | null;
     renameProject: (id: string, title: string) => void;
     deleteProjects: (ids: string[]) => void;
-    replaceProjects: (projects: CanvasProject[]) => void;
+    replaceProjects: (projects: CanvasProject[], tombstones?: SyncTombstone[]) => void;
     updateProject: (id: string, patch: Partial<Pick<CanvasProject, "nodes" | "connections" | "chatSessions" | "activeChatId" | "backgroundMode" | "showImageInfo" | "viewport">>) => void;
 };
 
@@ -48,6 +50,7 @@ export const useCanvasStore = create<CanvasStore>()(
         (set, get) => ({
             hydrated: false,
             projects: [],
+            projectTombstones: [],
             createProject: (title = "未命名画布") => {
                 const now = new Date().toISOString();
                 const id = nanoid();
@@ -95,9 +98,9 @@ export const useCanvasStore = create<CanvasStore>()(
             deleteProjects: (ids) =>
                 set((state) => {
                     const projects = state.projects.filter((project) => !ids.includes(project.id));
-                    return { projects };
+                    return { projects, projectTombstones: addTombstones(state.projectTombstones, ids, new Date().toISOString(), nanoid) };
                 }),
-            replaceProjects: (projects) => set({ projects }),
+            replaceProjects: (projects, tombstones) => set((state) => ({ projects, projectTombstones: tombstones || state.projectTombstones })),
             updateProject: (id, patch) =>
                 set((state) => ({
                     projects: state.projects.map((project) => (project.id === id ? { ...project, ...patch, updatedAt: new Date().toISOString() } : project)),
@@ -106,11 +109,12 @@ export const useCanvasStore = create<CanvasStore>()(
         {
             name: CANVAS_STATE_STORAGE_KEY,
             storage: canvasStorage,
-            version: 1,
-            migrate: (state) => ({ projects: Array.isArray((state as Partial<CanvasStore> | undefined)?.projects) ? (state as Partial<CanvasStore>).projects : [] }) as CanvasStore,
+            version: 2,
+            migrate: (state, version) => migrateCanvasData(state, version) as CanvasStore,
             partialize: (state) =>
                 ({
                     projects: state.projects,
+                    projectTombstones: state.projectTombstones,
                 }) as StorageValue<CanvasStore>["state"],
             onRehydrateStorage: () => (_state, error) => {
                 if (error) {

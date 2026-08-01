@@ -31,7 +31,7 @@ export type AppDataPersistenceCoordinator = {
     dispose: () => void;
 };
 
-export type AuthoritativeAppData = Readonly<{ projects: unknown[]; assets: unknown[] }>;
+export type AuthoritativeAppData = Readonly<{ projects: unknown[]; projectTombstones: unknown[]; assets: unknown[]; assetTombstones: unknown[] }>;
 export type AuthoritativeAppDataReader = <T>(operation: (data: AuthoritativeAppData) => Promise<T>) => Promise<T>;
 
 export function createAppDataPersistenceCoordinator(channels: AppDataPersistenceChannels): AppDataPersistenceCoordinator {
@@ -144,17 +144,20 @@ export function createAuthoritativeAppDataReader({ storage, runExclusive }: { st
             const [canvasRaw, assetRaw] = await Promise.all([storage.getItem(CANVAS_STATE_STORAGE_KEY), storage.getItem(ASSET_STATE_STORAGE_KEY)]);
             return operation({
                 projects: readPersistedCollection(canvasRaw, "projects"),
+                projectTombstones: readPersistedCollection(canvasRaw, "projectTombstones"),
                 assets: readPersistedCollection(assetRaw, "assets"),
+                assetTombstones: readPersistedCollection(assetRaw, "assetTombstones"),
             });
         });
 }
 
-function readPersistedCollection(raw: string | null, field: "projects" | "assets") {
+function readPersistedCollection(raw: string | null, field: "projects" | "projectTombstones" | "assets" | "assetTombstones") {
     const value = decodeDurableStateValue(raw);
     if (value === null) return [];
     try {
         const parsed = JSON.parse(value) as { state?: Record<string, unknown> };
         const collection = parsed?.state?.[field];
+        if (collection === undefined && (field === "projectTombstones" || field === "assetTombstones")) return [];
         if (!Array.isArray(collection)) throw new Error(`Missing ${field}`);
         return collection;
     } catch (error) {

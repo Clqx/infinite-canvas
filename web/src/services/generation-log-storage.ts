@@ -1,11 +1,16 @@
 import localforage from "localforage";
+import { nanoid } from "nanoid";
 
 import { createBrowserExclusiveRunner, type ExclusiveRunner } from "@/services/reliable-state-storage";
+import { compareTombstones, type SyncTombstone } from "@/services/app-data-schema";
 
 export type GenerationLogDomain = "image" | "video";
 export type GenerationLogStore = Pick<LocalForage, "iterate">;
 export type WritableGenerationLogStore = Pick<LocalForage, "getItem" | "iterate" | "removeItem" | "setItem">;
 type GenerationLogStores = Readonly<Record<GenerationLogDomain, GenerationLogStore>>;
+export type GenerationLogSnapshot = { logs: Record<string, unknown>[]; tombstones: SyncTombstone[] };
+
+const TOMBSTONE_FORMAT = "infinite-canvas-generation-log-tombstone-v1";
 
 const defaultStores: Readonly<Record<GenerationLogDomain, WritableGenerationLogStore>> = {
     image: localforage.createInstance({ name: "infinite-canvas", storeName: "image_generation_logs" }),
@@ -14,7 +19,12 @@ const defaultStores: Readonly<Record<GenerationLogDomain, WritableGenerationLogS
 const runGenerationLogsExclusive = createBrowserExclusiveRunner("generation-logs");
 
 export async function setStoredGenerationLog(domain: GenerationLogDomain, id: string, value: unknown) {
-    await runGenerationLogsExclusive(async () => void (await defaultStores[domain].setItem(id, value)));
+    await runGenerationLogsExclusive(async () => {
+        const existing = await defaultStores[domain].getItem<unknown>(id);
+        if (isStoredTombstone(existing)) return;
+        const storedValue = isLogRecord(value) ? { ...value, updatedAt: new Date().toISOString() } : value;
+        await defaultStores[domain].setItem(id, storedValue);
+    });
 }
 
 export async function removeStoredGenerationLogs(domain: GenerationLogDomain, ids: Iterable<string>, store: WritableGenerationLogStore = defaultStores[domain], runExclusive: ExclusiveRunner = runGenerationLogsExclusive) {
@@ -24,7 +34,8 @@ export async function removeStoredGenerationLogs(domain: GenerationLogDomain, id
             const value = await store.getItem<unknown>(id);
             if (value === null) continue;
             if (domain === "video" && isActiveLog(value)) continue;
-            await store.removeItem(id);
+            const tombstone = { format: TOMBSTONE_FORMAT, id, deletedAt: new Date().toISOString(), eventId: nanoid() };
+            await store.setItem(id, tombstone);
             removedIds.push(id);
         }
         return removedIds;
@@ -32,13 +43,27 @@ export async function removeStoredGenerationLogs(domain: GenerationLogDomain, id
 }
 
 export async function mergeStoredGenerationLogs(domain: GenerationLogDomain, incomingLogs: ReadonlyArray<Record<string, unknown>>, store: WritableGenerationLogStore = defaultStores[domain], runExclusive: ExclusiveRunner = runGenerationLogsExclusive) {
+    return (await mergeStoredGenerationSnapshot(domain, { logs: [...incomingLogs], tombstones: [] }, store, runExclusive)).logs;
+}
+
+export async function mergeStoredGenerationSnapshot(domain: GenerationLogDomain, incoming: GenerationLogSnapshot, store: WritableGenerationLogStore = defaultStores[domain], runExclusive: ExclusiveRunner = runGenerationLogsExclusive) {
     return runExclusive(async () => {
-        const currentLogs = (await readStoreValues(store)).filter(isLogRecord);
-        const mergedLogs = mergeLogRecords(currentLogs, incomingLogs);
+        const values = await readStoreValues(store, true);
+        const current = splitStoredValues(values);
+        const tombstones = mergeTombstones(current.tombstones, incoming.tombstones);
+        const mergedLogs = mergeLogRecords(current.logs, incoming.logs).filter((log) => {
+            const tombstone = tombstones.find((item) => item.id === log.id);
+            return !tombstone || logTime(log) > Date.parse(tombstone.deletedAt);
+        });
+        const liveIds = new Set(mergedLogs.map((log) => log.id as string));
         for (const log of mergedLogs) {
             await store.setItem(log.id as string, log);
         }
-        return mergedLogs;
+        for (const tombstone of tombstones) {
+            if (liveIds.has(tombstone.id)) continue;
+            await store.setItem(tombstone.id, { format: TOMBSTONE_FORMAT, ...tombstone });
+        }
+        return { logs: mergedLogs, tombstones };
     });
 }
 
@@ -46,10 +71,25 @@ export async function readStoredGenerationLogs(domain: GenerationLogDomain) {
     return runGenerationLogsExclusive(() => readStoreValues(defaultStores[domain]));
 }
 
+export async function readStoredGenerationSnapshot(domain: GenerationLogDomain): Promise<GenerationLogSnapshot> {
+    return runGenerationLogsExclusive(async () => splitStoredValues(await readStoreValues(defaultStores[domain], true)));
+}
+
 export async function withAllStoredGenerationLogs<T>(operation: (logs: { imageLogs: unknown[]; videoLogs: unknown[] }) => Promise<T>, stores: GenerationLogStores = defaultStores, runExclusive: ExclusiveRunner = runGenerationLogsExclusive) {
     return runExclusive(async () => {
         const [imageLogs, videoLogs] = await Promise.all([readStoreValues(stores.image), readStoreValues(stores.video)]);
         return operation({ imageLogs, videoLogs });
+    });
+}
+
+export async function withAllStoredGenerationSnapshots<T>(
+    operation: (snapshots: { image: GenerationLogSnapshot; video: GenerationLogSnapshot }) => Promise<T>,
+    stores: GenerationLogStores = defaultStores,
+    runExclusive: ExclusiveRunner = runGenerationLogsExclusive,
+) {
+    return runExclusive(async () => {
+        const [imageValues, videoValues] = await Promise.all([readStoreValues(stores.image, true), readStoreValues(stores.video, true)]);
+        return operation({ image: splitStoredValues(imageValues), video: splitStoredValues(videoValues) });
     });
 }
 
@@ -75,8 +115,23 @@ function mergeLogRecords(currentLogs: Record<string, unknown>[], incomingLogs: R
     return Array.from(merged.values()).sort((a, b) => logTime(b) - logTime(a));
 }
 
+function mergeTombstones(current: SyncTombstone[], incoming: SyncTombstone[]) {
+    const merged = new Map<string, SyncTombstone>();
+    for (const tombstone of [...current, ...incoming]) {
+        const existing = merged.get(tombstone.id);
+        if (!existing || compareTombstones(tombstone, existing) > 0) merged.set(tombstone.id, tombstone);
+    }
+    return Array.from(merged.values());
+}
+
 function isLogRecord(value: unknown): value is Record<string, unknown> {
-    return Boolean(value && typeof value === "object" && typeof (value as Record<string, unknown>).id === "string" && (value as Record<string, unknown>).id);
+    return Boolean(value && typeof value === "object" && !isStoredTombstone(value) && typeof (value as Record<string, unknown>).id === "string" && (value as Record<string, unknown>).id);
+}
+
+function isStoredTombstone(value: unknown): value is SyncTombstone & { format: typeof TOMBSTONE_FORMAT } {
+    if (!value || typeof value !== "object") return false;
+    const record = value as Record<string, unknown>;
+    return record.format === TOMBSTONE_FORMAT && typeof record.id === "string" && Boolean(record.id) && typeof record.deletedAt === "string" && Number.isFinite(Date.parse(record.deletedAt)) && typeof record.eventId === "string" && Boolean(record.eventId);
 }
 
 function isActiveLog(value: unknown) {
@@ -84,15 +139,26 @@ function isActiveLog(value: unknown) {
 }
 
 function logTime(log: Record<string, unknown>) {
+    if (typeof log.updatedAt === "number") return log.updatedAt;
+    if (typeof log.updatedAt === "string") return Date.parse(log.updatedAt) || 0;
     if (typeof log.createdAt === "number") return log.createdAt;
     if (typeof log.createdAt === "string") return Date.parse(log.createdAt) || 0;
     return 0;
 }
 
-async function readStoreValues(store: Pick<LocalForage, "iterate">) {
+function splitStoredValues(values: unknown[]): GenerationLogSnapshot {
+    const invalid = values.find((value) => !isLogRecord(value) && !isStoredTombstone(value));
+    if (invalid !== undefined) throw new Error("生成记录存储包含无法识别的数据");
+    return {
+        logs: values.filter(isLogRecord),
+        tombstones: values.filter(isStoredTombstone).map(({ id, deletedAt, eventId }) => ({ id, deletedAt, eventId })),
+    };
+}
+
+async function readStoreValues(store: Pick<LocalForage, "iterate">, includeTombstones = false) {
     const values: unknown[] = [];
     await store.iterate<unknown, void>((value) => {
-        values.push(value);
+        if (includeTombstones || !isStoredTombstone(value)) values.push(value);
     });
     return values;
 }

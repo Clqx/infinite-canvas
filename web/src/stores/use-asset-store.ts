@@ -7,6 +7,7 @@ import { cleanupUnusedImages, resolveImageUrl, uploadImage } from "@/services/im
 import { cleanupUnusedMedia, resolveMediaUrl } from "@/services/file-storage";
 import { cleanupAppMediaAfterFlush } from "@/services/app-media-cleanup";
 import { withAllStoredGenerationLogs } from "@/services/generation-log-storage";
+import { addTombstones, migrateAssetData, type SyncTombstone } from "@/services/app-data-schema";
 
 export type AssetKind = "text" | "image" | "video";
 export type TextAsset = AssetBase<"text"> & { data: { content: string } };
@@ -30,10 +31,11 @@ type AssetBase<T extends AssetKind> = {
 type AssetStore = {
     hydrated: boolean;
     assets: Asset[];
+    assetTombstones: SyncTombstone[];
     addAsset: (asset: Omit<Asset, "id" | "createdAt" | "updatedAt">) => string;
     updateAsset: (id: string, patch: Partial<Omit<Asset, "id" | "createdAt">>) => void;
     removeAsset: (id: string) => void;
-    replaceAssets: (assets: Asset[]) => void;
+    replaceAssets: (assets: Asset[], tombstones?: SyncTombstone[]) => void;
     cleanupImages: (extra?: unknown) => Promise<void>;
 };
 
@@ -68,6 +70,7 @@ export const useAssetStore = create<AssetStore>()(
         (set, get) => ({
             hydrated: false,
             assets: [],
+            assetTombstones: [],
             addAsset: (asset) => {
                 const now = new Date().toISOString();
                 const id = nanoid();
@@ -78,8 +81,12 @@ export const useAssetStore = create<AssetStore>()(
                 set((state) => ({
                     assets: state.assets.map((asset) => (asset.id === id ? ({ ...asset, ...patch, updatedAt: new Date().toISOString() } as Asset) : asset)),
                 })),
-            removeAsset: (id) => set((state) => ({ assets: state.assets.filter((asset) => asset.id !== id) })),
-            replaceAssets: (assets) => set({ assets }),
+            removeAsset: (id) =>
+                set((state) => ({
+                    assets: state.assets.filter((asset) => asset.id !== id),
+                    assetTombstones: addTombstones(state.assetTombstones, [id], new Date().toISOString(), nanoid),
+                })),
+            replaceAssets: (assets, tombstones) => set((state) => ({ assets, assetTombstones: tombstones || state.assetTombstones })),
             cleanupImages: async (extra) => {
                 await cleanupAppMediaAfterFlush({
                     flush: appDataPersistence.flushAll,
@@ -92,9 +99,9 @@ export const useAssetStore = create<AssetStore>()(
         {
             name: ASSET_STATE_STORAGE_KEY,
             storage: assetStorage,
-            version: 1,
-            migrate: (state) => ({ assets: Array.isArray((state as Partial<AssetStore> | undefined)?.assets) ? (state as Partial<AssetStore>).assets : [] }) as AssetStore,
-            partialize: (state) => ({ assets: state.assets }) as StorageValue<AssetStore>["state"],
+            version: 2,
+            migrate: (state, version) => migrateAssetData(state, version) as AssetStore,
+            partialize: (state) => ({ assets: state.assets, assetTombstones: state.assetTombstones }) as StorageValue<AssetStore>["state"],
             onRehydrateStorage: () => (_state, error) => {
                 if (error) {
                     if (assetStateStorage.markHydrationError(error)) useAssetStore.setState({ hydrated: false });

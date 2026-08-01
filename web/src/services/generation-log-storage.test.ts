@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { filterDeletableGenerationLogIds, mergeStoredGenerationLogs, readAllStoredGenerationLogs, removeStoredGenerationLogs, withAllStoredGenerationLogs, type GenerationLogStore, type WritableGenerationLogStore } from "./generation-log-storage";
+import {
+    filterDeletableGenerationLogIds,
+    mergeStoredGenerationLogs,
+    mergeStoredGenerationSnapshot,
+    readAllStoredGenerationLogs,
+    removeStoredGenerationLogs,
+    withAllStoredGenerationLogs,
+    type GenerationLogStore,
+    type WritableGenerationLogStore,
+} from "./generation-log-storage";
 import { collectImageStorageKeys } from "./image-storage";
 import { collectMediaStorageKeys } from "./file-storage";
 
@@ -97,8 +106,27 @@ test("video deletion rechecks authoritative status inside the storage lock", asy
     });
     assert.deepEqual(removed, ["done"]);
     assert.equal(memory.values.has("pending"), true);
-    assert.equal(memory.values.has("done"), false);
+    assert.equal(memory.values.get("done")?.format, "infinite-canvas-generation-log-tombstone-v1");
     assert.equal(lockHeld, false);
+});
+
+test("a generation tombstone prevents an older merge from restoring a deleted record", async () => {
+    const memory = writableMemoryStore([{ format: "infinite-canvas-generation-log-tombstone-v1", id: "deleted", deletedAt: new Date().toISOString(), eventId: "event" }]);
+
+    const merged = await mergeStoredGenerationLogs("image", [{ id: "deleted", status: "success", createdAt: 1 }], memory.store, async (operation) => operation());
+
+    assert.deepEqual(merged, []);
+    assert.equal(memory.values.get("deleted")?.format, "infinite-canvas-generation-log-tombstone-v1");
+});
+
+test("generation snapshot merge lets a newer deletion win and keeps its tombstone", async () => {
+    const memory = writableMemoryStore([{ id: "deleted", status: "success", updatedAt: "2026-08-01T00:00:00.000Z" }]);
+
+    const merged = await mergeStoredGenerationSnapshot("image", { logs: [], tombstones: [{ id: "deleted", deletedAt: "2026-08-02T00:00:00.000Z", eventId: "remote-delete" }] }, memory.store, async (operation) => operation());
+
+    assert.deepEqual(merged.logs, []);
+    assert.equal(merged.tombstones.length, 1);
+    assert.equal(memory.values.get("deleted")?.format, "infinite-canvas-generation-log-tombstone-v1");
 });
 
 test("atomic log merge preserves records created after the earlier sync read", async () => {

@@ -4,6 +4,32 @@ export const WEBDAV_MANIFEST_FILE_NAME = "manifest.json";
 const WEBDAV_REQUEST_TIMEOUT_MS = 120000;
 const ensuredDirectories = new Set<string>();
 
+export class WebdavConflictError extends Error {
+    constructor(message = "WebDAV 远端数据已更新，请重新读取后再同步") {
+        super(message);
+        this.name = "WebdavConflictError";
+    }
+}
+
+export class WebdavVersionUnavailableError extends Error {
+    constructor(message = "WebDAV 服务未提供可用的强 ETag，已停止双向同步") {
+        super(message);
+        this.name = "WebdavVersionUnavailableError";
+    }
+}
+
+export class WebdavCapacityError extends Error {
+    readonly status: number;
+
+    constructor(status: number, message: string) {
+        super(message);
+        this.name = "WebdavCapacityError";
+        this.status = status;
+    }
+}
+
+export type VersionedWebdavFile = { file: Blob | null; etag: string | null };
+
 export async function testWebdavConnection(config: WebdavSyncConfig) {
     await ensureWebdavDirectory(config);
     const response = await webdavFetch(config, "", { method: "PROPFIND", headers: { Depth: "0" } });
@@ -28,16 +54,41 @@ export async function uploadWebdavSyncFile(config: WebdavSyncConfig, file: Blob)
     return uploadWebdavFile(config, WEBDAV_MANIFEST_FILE_NAME, file, "application/json");
 }
 
-export async function uploadWebdavFile(config: WebdavSyncConfig, path: string, file: Blob, contentType = "application/octet-stream") {
+export async function uploadWebdavFile(config: WebdavSyncConfig, path: string, file: Blob, contentType = "application/octet-stream", expectedEtag?: string | null) {
     if (!file.size) throw new Error("上传文件为空，已取消上传");
     await ensureWebdavDirectory(config);
     await ensureWebdavSubdirectory(config, path);
+    const headers: Record<string, string> = { "Content-Type": contentType };
+    if (expectedEtag === null) headers["If-None-Match"] = "*";
+    else if (expectedEtag !== undefined) {
+        if (!isStrongEtag(expectedEtag)) throw new WebdavVersionUnavailableError();
+        headers["If-Match"] = expectedEtag;
+    }
     const response = await webdavFetch(config, path, {
         method: "PUT",
-        headers: { "Content-Type": contentType },
+        headers,
         body: file,
     });
     if (!response.ok) await throwWebdavError(response, "上传 WebDAV 同步文件失败");
+}
+
+async function readStrongEtagFromProperties(config: WebdavSyncConfig, path: string) {
+    const properties = await webdavFetch(config, path, {
+        method: "PROPFIND",
+        headers: { Depth: "0", "Content-Type": "application/xml" },
+        body: '<?xml version="1.0"?><propfind xmlns="DAV:"><prop><getetag/></prop></propfind>',
+    });
+    if (!properties.ok && properties.status !== 207) return null;
+    const xmlText = await properties.text();
+    if (xmlText.length > 1024 * 1024) return null;
+    const document = new DOMParser().parseFromString(xmlText, "application/xml");
+    if (document.querySelector("parsererror")) return null;
+    const etag = document.getElementsByTagNameNS("DAV:", "getetag")[0]?.textContent?.trim() || null;
+    return isStrongEtag(etag) ? etag : null;
+}
+
+function isStrongEtag(value: string | null): value is string {
+    return Boolean(value && !value.startsWith("W/") && /^"[^"\r\n]+"$/.test(value));
 }
 
 async function ensureWebdavDirectory(config: WebdavSyncConfig) {
@@ -110,11 +161,35 @@ function assertWebdavConfig(config: WebdavSyncConfig) {
     if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) throw new Error("WebDAV 必须使用 HTTPS；仅本机回环地址允许 HTTP");
 }
 
+export async function downloadVersionedWebdavFile(config: WebdavSyncConfig, path: string): Promise<VersionedWebdavFile> {
+    await ensureWebdavDirectory(config);
+    let response = await webdavFetch(config, path, { method: "GET" });
+    if (response.status === 404) return { file: null, etag: null };
+    if (!response.ok) await throwWebdavError(response, "读取 WebDAV 版本化文件失败");
+    let etag = response.headers.get("etag");
+    if (!isStrongEtag(etag)) {
+        etag = await readStrongEtagFromProperties(config, path);
+        if (!etag) throw new WebdavVersionUnavailableError();
+        response = await webdavFetch(config, path, { method: "GET", headers: { "If-Match": etag } });
+        if (!response.ok) await throwWebdavError(response, "读取 WebDAV 版本化文件失败");
+        const responseEtag = response.headers.get("etag");
+        if (responseEtag && (!isStrongEtag(responseEtag) || responseEtag !== etag)) throw new WebdavConflictError();
+    }
+    const file = await withTimeout(response.blob(), "读取 WebDAV 版本化文件超时");
+    if (!file.size) throw new Error("WebDAV 版本化文件为空");
+    return { file, etag };
+}
+
 async function throwWebdavError(response: Response, fallback: string): Promise<never> {
-    const detail = await response.text().catch(() => "");
     if (response.status === 401 || response.status === 403) throw new Error("WebDAV 认证失败，请检查用户名、密码或应用密码");
     if (response.status === 404) throw new Error("WebDAV 路径不存在，请检查地址和远程目录");
-    throw new Error(`${fallback}：${response.status}${detail ? ` ${detail.slice(0, 120)}` : ""}`);
+    if (response.status === 409) throw new Error("WebDAV 目录状态已变化，请重新测试连接后重试");
+    if (response.status === 412) throw new WebdavConflictError();
+    if (response.status === 413) throw new WebdavCapacityError(413, "WebDAV 单文件超过服务端上传限制");
+    if (response.status === 507) throw new WebdavCapacityError(507, "WebDAV 远端可用空间不足");
+    if (response.status === 423) throw new Error("WebDAV 远端文件暂时被占用，请稍后重试");
+    if (response.status === 429) throw new Error("WebDAV 请求过于频繁，请稍后重试");
+    throw new Error(`${fallback}：${response.status}`);
 }
 
 function encodeBasicAuth(value: string) {

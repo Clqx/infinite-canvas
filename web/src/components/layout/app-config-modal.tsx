@@ -6,6 +6,7 @@ import { ModelPicker } from "@/components/model-picker";
 import { ChannelEditorDrawer } from "@/components/layout/channel-editor-drawer";
 import { ConfigPromptSources } from "@/components/layout/config-prompt-sources";
 import { VaultSecurityPanel } from "@/components/auth/vault-security-panel";
+import { AppBackupPanel } from "@/components/layout/app-backup-panel";
 import { applyAppConfig, exportAppConfig, readAppConfig } from "@/services/config-file";
 import { syncAppDataToWebdav, type AppSyncDomainKey, type AppSyncProgressEvent } from "@/services/app-sync";
 import { testWebdavConnection, WEBDAV_MANIFEST_FILE_NAME } from "@/services/webdav-sync";
@@ -292,6 +293,11 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                         key: "prompt-sources",
                         label: "提示词来源",
                         children: <ConfigPromptSources />,
+                    },
+                    {
+                        key: "data",
+                        label: "数据",
+                        children: <AppBackupPanel />,
                     },
                     {
                         key: "webdav",
