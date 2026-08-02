@@ -1,6 +1,5 @@
-import localforage from "localforage";
-
 import { CryptoEnvelopeError, createEnvelopeSession, parseCryptoEnvelope, serializeCryptoEnvelope, unlockEnvelopeSession, type EnvelopeSession } from "@/lib/crypto-envelope";
+import { createUserScopedLocalForage, userScopedResourceName } from "@/services/local-user-profiles";
 
 export const LOCAL_VAULT_ACTIVE_KEY = "active";
 export const LOCAL_VAULT_PENDING_KEY = "pending";
@@ -57,7 +56,7 @@ export type LocalVaultOptions<T> = {
     sessionLock?: LocalVaultSessionLock;
 };
 
-const localVaultStore = localforage.createInstance({ name: "infinite-canvas", storeName: "secure_vault" });
+const localVaultStore = createUserScopedLocalForage({ name: "infinite-canvas", storeName: "secure_vault" });
 
 export const localForageVaultStorage: LocalVaultStorage = {
     async getItem(key) {
@@ -314,7 +313,7 @@ const webLockSession: LocalVaultSessionLock = {
         const hold = new Promise<void>((resolve) => {
             releaseHold = resolve;
         });
-        const request = navigator.locks.request(LOCAL_VAULT_LOCK_NAME, { mode: "exclusive", ifAvailable: true }, async (lock) => {
+        const request = navigator.locks.request(userScopedResourceName(LOCAL_VAULT_LOCK_NAME), { mode: "exclusive", ifAvailable: true }, async (lock) => {
             if (!lock) {
                 rejectAcquired?.(new LocalVaultError("IN_USE", "Vault is unlocked in another tab"));
                 return;

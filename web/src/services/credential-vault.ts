@@ -1,6 +1,7 @@
 import { openWithPassword, sealWithPassword, serializeCryptoEnvelope } from "@/lib/crypto-envelope";
 import { parseAppConfig } from "@/services/config-file";
 import { createLocalVault } from "@/services/local-vault";
+import { getActiveLocalUserProfile } from "@/services/local-user-profiles";
 import type { PromptSource } from "@/services/api/prompt-source-presets";
 import { CONFIG_STORE_KEY, defaultConfig, defaultWebdavSyncConfig, normalizeAiConfig, normalizeWebdavConfig, type AiConfig, type WebdavSyncConfig } from "@/stores/use-config-store";
 import { PROMPT_SOURCE_STORE_KEY, defaultPromptSourceSchedule, normalizePromptSourceState, type PromptSourceSchedule } from "@/stores/use-prompt-source-store";
@@ -28,10 +29,11 @@ export type CredentialVaultPayload = {
 export const credentialVault = createLocalVault<CredentialVaultPayload>({ validatePayload: normalizeCredentialVaultPayload });
 
 export function createDefaultCredentialPayload(): CredentialVaultPayload {
+    const profile = getActiveLocalUserProfile();
     return {
         schemaVersion: 1,
         config: normalizeAiConfig(defaultConfig),
-        webdav: normalizeWebdavConfig(defaultWebdavSyncConfig),
+        webdav: normalizeWebdavConfig({ ...defaultWebdavSyncConfig, directory: profile && !profile.legacyOwner ? `infinite-canvas/users/${profile.id}` : defaultWebdavSyncConfig.directory }),
         promptSources: normalizePromptSourceState({ sources: [], schedule: defaultPromptSourceSchedule }),
         agentConnection: { url: "http://127.0.0.1:17371", token: "" },
     };

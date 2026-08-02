@@ -40,6 +40,7 @@ export const usePluginStore = create<PluginStore>()(
         {
             name: "infinite-canvas:plugin_store",
             storage: createJSONStorage(() => localForageStorage),
+            skipHydration: true,
         },
     ),
 );

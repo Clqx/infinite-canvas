@@ -1,5 +1,6 @@
-import localforage from "localforage";
 import type { StateStorage } from "zustand/middleware";
+
+import { createUserScopedLocalForage, getActiveLocalUserProfile } from "@/services/local-user-profiles";
 
 export type LegacyStateStorage = Pick<StateStorage, "getItem" | "removeItem">;
 
@@ -80,10 +81,9 @@ export function createLocalForageStorage({ authoritative, legacy = null }: Local
     };
 }
 
-const appStateStore = localforage.createInstance({
+const appStateStore = createUserScopedLocalForage({
     name: "infinite-canvas",
     storeName: "app_state",
-    driver: localforage.INDEXEDDB,
 });
 
 const authoritativeStorage: StateStorage = {
@@ -102,9 +102,9 @@ const authoritativeStorage: StateStorage = {
 };
 
 const legacyStorage: LegacyStateStorage = {
-    getItem: (name) => (typeof window === "undefined" ? null : window.localStorage.getItem(name)),
+    getItem: (name) => (typeof window === "undefined" || !getActiveLocalUserProfile()?.legacyOwner ? null : window.localStorage.getItem(name)),
     removeItem: (name) => {
-        if (typeof window !== "undefined") window.localStorage.removeItem(name);
+        if (typeof window !== "undefined" && getActiveLocalUserProfile()?.legacyOwner) window.localStorage.removeItem(name);
     },
 };
 

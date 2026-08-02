@@ -1,8 +1,7 @@
-import localforage from "localforage";
-
 import { nanoid } from "nanoid";
 import { readImageMeta } from "@/lib/image-utils";
 import { mediaGarbageCollector } from "@/services/media-garbage-collector";
+import { createUserScopedLocalForage } from "@/services/local-user-profiles";
 
 export type UploadedImage = {
     url: string;
@@ -13,7 +12,7 @@ export type UploadedImage = {
     mimeType: string;
 };
 
-const store = localforage.createInstance({ name: "infinite-canvas", storeName: "image_files" });
+const store = createUserScopedLocalForage({ name: "infinite-canvas", storeName: "image_files" });
 const objectUrls = new Map<string, string>();
 
 export async function uploadImage(input: string | Blob): Promise<UploadedImage> {

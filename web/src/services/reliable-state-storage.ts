@@ -1,5 +1,7 @@
 import type { StateStorage } from "zustand/middleware";
 
+import { getActiveLocalUserProfile, userScopedResourceName } from "@/services/local-user-profiles";
+
 export type PersistencePhase = "hydrating" | "clean" | "scheduled" | "writing" | "retry-wait" | "error";
 
 export type PersistenceStatus = {
@@ -382,7 +384,8 @@ export function createBrowserExclusiveRunner(key: string, environment = { isBrow
     }
     return (operation) =>
         new Promise((resolve, reject) => {
-            void locks.request(`infinite-canvas-state:${key}`, { mode: "exclusive" }, () => operation().then(resolve, reject)).catch(reject);
+            const lockName = `infinite-canvas-state:${key}`;
+            void locks.request(getActiveLocalUserProfile() ? userScopedResourceName(lockName) : lockName, { mode: "exclusive" }, () => operation().then(resolve, reject)).catch(reject);
         });
 }
 

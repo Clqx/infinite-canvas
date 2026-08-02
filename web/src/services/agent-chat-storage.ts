@@ -1,11 +1,10 @@
-import localforage from "localforage";
-
 import { upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
+import { createUserScopedLocalForage } from "@/services/local-user-profiles";
 import type { AgentAttachment, AgentChatItem } from "@/stores/use-agent-store";
 
 export type StoredAgentUserMessage = Pick<AgentChatItem, "id" | "text" | "attachments"> & { role: "user"; historyText: string };
 
-const store = localforage.createInstance({ name: "infinite-canvas", storeName: "agent_chat_messages" });
+const store = createUserScopedLocalForage({ name: "infinite-canvas", storeName: "agent_chat_messages" });
 const indexKey = (threadId: string) => `thread:${threadId}`;
 const messageKey = (threadId: string, messageId: string) => `message:${threadId}:${messageId}`;
 

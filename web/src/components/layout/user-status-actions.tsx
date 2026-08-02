@@ -1,7 +1,7 @@
 import type { CSSProperties } from "react";
 import { useSyncExternalStore } from "react";
-import { BookOpen, CircleAlert, HardDrive, Keyboard, LoaderCircle, LockKeyhole, Puzzle, Settings2 } from "lucide-react";
-import { App } from "antd";
+import { BookOpen, CircleAlert, CircleUserRound, HardDrive, Keyboard, LoaderCircle, LockKeyhole, Puzzle, Settings2 } from "lucide-react";
+import { App, Tooltip } from "antd";
 
 import { AnimatedThemeToggler } from "@/components/ui/animated-theme-toggler";
 import { GitHubLink } from "@/components/layout/github-link";
@@ -28,6 +28,7 @@ export function UserStatusActions({ showConfig = true, variant = "default", onOp
     const setTheme = useThemeStore((state) => state.setTheme);
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const lock = useAuthStore((state) => state.lock);
+    const profile = useAuthStore((state) => state.profile);
     const persistenceStatus = useSyncExternalStore(appDataPersistence.subscribe, appDataPersistence.getStatus, appDataPersistence.getStatus);
     const canvasTheme = canvasThemes[theme];
     const naturalIconClass = "inline-flex size-7 shrink-0 items-center justify-center text-stone-600 transition hover:text-stone-950 dark:text-stone-300 dark:hover:text-white [&_svg]:size-4";
@@ -38,6 +39,21 @@ export function UserStatusActions({ showConfig = true, variant = "default", onOp
 
     return (
         <div className="inline-flex shrink-0 items-center gap-1">
+            {profile ? (
+                <Tooltip title={`当前用户：${profile.displayName}（${profile.role === "admin" ? "管理员" : "用户"}）`}>
+                    <div
+                        className="hidden h-8 min-w-0 max-w-40 items-center gap-2 border-r border-stone-200 pr-2 text-stone-700 md:inline-flex dark:border-stone-700 dark:text-stone-200"
+                        style={iconStyle}
+                        aria-label={`当前用户 ${profile.displayName}，${profile.role === "admin" ? "管理员" : "用户"}`}
+                    >
+                        <CircleUserRound className="size-4 shrink-0" />
+                        <span className="hidden min-w-0 xl:block">
+                            <span className="block max-w-24 truncate text-xs font-medium leading-4">{profile.displayName}</span>
+                            <span className="block text-[10px] leading-3 opacity-60">{profile.role === "admin" ? "管理员" : "用户"}</span>
+                        </span>
+                    </div>
+                </Tooltip>
+            ) : null}
             <button
                 type="button"
                 className={cn(naturalIconClass, persistenceStatus.hasError && "text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300")}

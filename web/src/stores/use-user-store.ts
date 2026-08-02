@@ -1,9 +1,12 @@
 import { create } from "zustand";
 
+import type { LocalUserRole } from "@/services/local-user-profiles";
+
 export type LocalUser = {
     id: string;
     username: string;
     displayName: string;
+    role: LocalUserRole;
     avatarUrl: string;
 };
 

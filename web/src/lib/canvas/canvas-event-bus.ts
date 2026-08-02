@@ -1,5 +1,4 @@
-import localforage from "localforage";
-
+import { createUserScopedLocalForage } from "@/services/local-user-profiles";
 import type { PluginStorage } from "@/types/canvas-plugin";
 
 // 画布内轻量事件总线,供节点/插件互相通信
@@ -32,7 +31,7 @@ const stores = new Map<string, LocalForage>();
 export function createPluginStorage(pluginId: string): PluginStorage {
     let store = stores.get(pluginId);
     if (!store) {
-        store = localforage.createInstance({ name: "infinite-canvas-plugins", storeName: pluginId });
+        store = createUserScopedLocalForage({ name: "infinite-canvas-plugins", storeName: pluginId });
         stores.set(pluginId, store);
     }
     return {

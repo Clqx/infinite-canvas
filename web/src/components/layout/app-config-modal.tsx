@@ -6,6 +6,7 @@ import { ModelPicker } from "@/components/model-picker";
 import { ChannelEditorDrawer } from "@/components/layout/channel-editor-drawer";
 import { ConfigPromptSources } from "@/components/layout/config-prompt-sources";
 import { VaultSecurityPanel } from "@/components/auth/vault-security-panel";
+import { LocalUserAdminPanel } from "@/components/auth/local-user-admin-panel";
 import { AppBackupPanel } from "@/components/layout/app-backup-panel";
 import { applyAppConfig, exportAppConfig, readAppConfig } from "@/services/config-file";
 import { syncAppDataToWebdav, type AppSyncDomainKey, type AppSyncProgressEvent } from "@/services/app-sync";
@@ -81,6 +82,8 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
     const setConfigDialogOpen = useConfigStore((state) => state.setConfigDialogOpen);
     const clearPromptContinue = useConfigStore((state) => state.clearPromptContinue);
     const flushCredentials = useAuthStore((state) => state.flush);
+    const authStatus = useAuthStore((state) => state.status);
+    const currentUser = useAuthStore((state) => state.profile);
     const webdavReady = Boolean(webdav.url.trim());
     const editingChannel = config.channels.find((channel) => channel.id === editingChannelId) || null;
     useEffect(() => setActiveTab(initialTab), [initialTab]);
@@ -205,6 +208,15 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "channels"
                 activeKey={activeTab}
                 onChange={(key) => setActiveTab(key as ConfigTabKey)}
                 items={[
+                    ...(authStatus === "unlocked" && currentUser?.role === "admin" && currentUser.status === "active"
+                        ? [
+                              {
+                                  key: "users",
+                                  label: "用户",
+                                  children: <LocalUserAdminPanel />,
+                              },
+                          ]
+                        : []),
                     {
                         key: "channels",
                         label: "渠道",

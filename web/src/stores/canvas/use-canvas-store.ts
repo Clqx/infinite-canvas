@@ -109,6 +109,7 @@ export const useCanvasStore = create<CanvasStore>()(
         {
             name: CANVAS_STATE_STORAGE_KEY,
             storage: canvasStorage,
+            skipHydration: true,
             version: 2,
             migrate: (state, version) => migrateCanvasData(state, version) as CanvasStore,
             partialize: (state) =>

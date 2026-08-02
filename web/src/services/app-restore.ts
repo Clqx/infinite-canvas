@@ -1,4 +1,3 @@
-import localforage from "localforage";
 import { nanoid } from "nanoid";
 
 import { flushAppDataPersistence } from "@/services/app-data-persistence-actions";
@@ -9,6 +8,7 @@ import { deleteStoredMedia, getMediaBlob, resolveMediaUrl, setMediaBlob } from "
 import { mergeStoredGenerationSnapshot, purgeStoredGenerationLogs, readStoredGenerationSnapshot } from "@/services/generation-log-storage";
 import { deleteStoredImages, getImageBlob, resolveImageUrl, setImageBlob } from "@/services/image-storage";
 import { createBrowserExclusiveRunner } from "@/services/reliable-state-storage";
+import { createUserScopedLocalForage, userScopedResourceName } from "@/services/local-user-profiles";
 import type { Asset } from "@/stores/use-asset-store";
 import { useAssetStore } from "@/stores/use-asset-store";
 import type { CanvasProject } from "@/stores/canvas/use-canvas-store";
@@ -18,7 +18,7 @@ const RESTORE_JOURNAL_KEY = "active";
 const RESTORE_COMPLETION_KEY = "last_completion";
 const RESTORE_JOURNAL_FORMAT = "infinite-canvas-copy-restore-v1";
 const RESTORE_CHANNEL_NAME = "infinite-canvas:app-restore";
-const restoreStore = localforage.createInstance({ name: "infinite-canvas", storeName: "app_restore_journal", driver: localforage.INDEXEDDB });
+const restoreStore = createUserScopedLocalForage({ name: "infinite-canvas", storeName: "app_restore_journal" });
 const runRestoreExclusive = createBrowserExclusiveRunner("app-restore");
 const runMaintenanceExclusive = createBrowserExclusiveRunner("app-maintenance");
 const restoreSourceId = nanoid();
@@ -515,7 +515,7 @@ export function parseAppRestoreJournal(value: unknown): AppRestoreJournal {
 
 function ensureRestoreChannel() {
     if (restoreChannel || typeof BroadcastChannel === "undefined") return;
-    restoreChannel = new BroadcastChannel(RESTORE_CHANNEL_NAME);
+    restoreChannel = new BroadcastChannel(userScopedResourceName(RESTORE_CHANNEL_NAME));
     restoreChannel.onmessage = (event: MessageEvent<unknown>) => {
         const message = event.data;
         if (!message || typeof message !== "object" || (message as { type?: unknown }).type !== "changed" || typeof (message as { sourceId?: unknown }).sourceId !== "string") return;

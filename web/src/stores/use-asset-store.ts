@@ -101,6 +101,7 @@ export const useAssetStore = create<AssetStore>()(
         {
             name: ASSET_STATE_STORAGE_KEY,
             storage: assetStorage,
+            skipHydration: true,
             version: 2,
             migrate: (state, version) => migrateAssetData(state, version) as AssetStore,
             partialize: (state) => ({ assets: state.assets, assetTombstones: state.assetTombstones }) as StorageValue<AssetStore>["state"],

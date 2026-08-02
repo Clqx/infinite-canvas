@@ -1,8 +1,8 @@
-import localforage from "localforage";
 import { nanoid } from "nanoid";
 
 import { createBrowserExclusiveRunner, type ExclusiveRunner } from "@/services/reliable-state-storage";
 import { compareTombstones, type SyncTombstone } from "@/services/app-data-schema";
+import { createUserScopedLocalForage } from "@/services/local-user-profiles";
 
 export type GenerationLogDomain = "image" | "video";
 export type GenerationLogStore = Pick<LocalForage, "iterate">;
@@ -13,8 +13,8 @@ export type GenerationLogSnapshot = { logs: Record<string, unknown>[]; tombstone
 const TOMBSTONE_FORMAT = "infinite-canvas-generation-log-tombstone-v1";
 
 const defaultStores: Readonly<Record<GenerationLogDomain, WritableGenerationLogStore>> = {
-    image: localforage.createInstance({ name: "infinite-canvas", storeName: "image_generation_logs" }),
-    video: localforage.createInstance({ name: "infinite-canvas", storeName: "video_generation_logs" }),
+    image: createUserScopedLocalForage({ name: "infinite-canvas", storeName: "image_generation_logs" }),
+    video: createUserScopedLocalForage({ name: "infinite-canvas", storeName: "video_generation_logs" }),
 };
 const runGenerationLogsExclusive = createBrowserExclusiveRunner("generation-logs");
 

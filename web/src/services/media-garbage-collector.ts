@@ -1,4 +1,4 @@
-import localforage from "localforage";
+import { createUserScopedLocalForage } from "@/services/local-user-profiles";
 
 type Candidate = { firstSeenAt: number };
 
@@ -43,6 +43,6 @@ export function createMediaGarbageCollector({ storage, graceMs = 5 * 60_000, now
     };
 }
 
-const candidateStore = localforage.createInstance({ name: "infinite-canvas", storeName: "media_gc_candidates", driver: localforage.INDEXEDDB });
+const candidateStore = createUserScopedLocalForage({ name: "infinite-canvas", storeName: "media_gc_candidates" });
 
 export const mediaGarbageCollector = createMediaGarbageCollector({ storage: candidateStore });

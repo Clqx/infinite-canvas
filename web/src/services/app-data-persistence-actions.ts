@@ -6,6 +6,11 @@ export function flushAppDataPersistence() {
     return appDataPersistence.flushAll();
 }
 
+export async function hydrateAppDataPersistence() {
+    const [{ useCanvasStore }, { useAssetStore }] = await Promise.all([import("@/stores/canvas/use-canvas-store"), import("@/stores/use-asset-store")]);
+    await Promise.all([Promise.resolve(useCanvasStore.persist.rehydrate()), Promise.resolve(useAssetStore.persist.rehydrate())]);
+}
+
 export function retryAppDataPersistence() {
     if (retryPromise) return retryPromise;
     retryPromise = (async () => {

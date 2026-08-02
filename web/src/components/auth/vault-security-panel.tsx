@@ -109,7 +109,7 @@ export function VaultSecurityPanel() {
 
             <section>
                 <div className="mb-1 text-sm font-semibold">凭据重置</div>
-                <div className="mb-3 text-xs text-stone-500">忘记密码时可删除凭据保险库；画布、素材及媒体保持不变。</div>
+                <div className="mb-3 text-xs text-stone-500">仅在当前用户已解锁时清空连接配置；本地密码、画布、素材及媒体保持不变。</div>
                 <Button danger icon={<RotateCcw className="size-4" />} onClick={confirmReset}>
                     重置全部凭据
                 </Button>

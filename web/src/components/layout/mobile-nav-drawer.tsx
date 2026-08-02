@@ -1,8 +1,10 @@
 import { Drawer } from "antd";
+import { CircleUserRound } from "lucide-react";
 import { Link } from "react-router-dom";
 
 import { navigationTools, type NavigationToolSlug } from "@/constant/navigation-tools";
 import { cn } from "@/lib/utils";
+import { useAuthStore } from "@/stores/use-auth-store";
 
 type MobileNavDrawerProps = {
     open: boolean;
@@ -11,8 +13,21 @@ type MobileNavDrawerProps = {
 };
 
 export function MobileNavDrawer({ open, activeToolSlug, onClose }: MobileNavDrawerProps) {
+    const profile = useAuthStore((state) => state.profile);
+
     return (
         <Drawer title="导航" placement="left" size={280} open={open} onClose={onClose} className="md:hidden">
+            {profile ? (
+                <div className="mb-4 flex min-w-0 items-center gap-3 border-b border-stone-200 px-3 pb-4 dark:border-stone-800">
+                    <CircleUserRound className="size-5 shrink-0 text-stone-500 dark:text-stone-400" />
+                    <div className="min-w-0">
+                        <div className="truncate text-sm font-medium text-stone-950 dark:text-stone-100">{profile.displayName}</div>
+                        <div className="truncate text-xs text-stone-500 dark:text-stone-400">
+                            {profile.username} · {profile.role === "admin" ? "管理员" : "用户"}
+                        </div>
+                    </div>
+                </div>
+            ) : null}
             <div className="space-y-1">
                 {navigationTools.map((tool) => {
                     const Icon = tool.icon;
