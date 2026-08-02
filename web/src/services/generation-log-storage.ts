@@ -42,6 +42,12 @@ export async function removeStoredGenerationLogs(domain: GenerationLogDomain, id
     });
 }
 
+export async function purgeStoredGenerationLogs(domain: GenerationLogDomain, ids: Iterable<string>, store: WritableGenerationLogStore = defaultStores[domain], runExclusive: ExclusiveRunner = runGenerationLogsExclusive) {
+    return runExclusive(async () => {
+        for (const id of new Set(ids)) await store.removeItem(id);
+    });
+}
+
 export async function mergeStoredGenerationLogs(domain: GenerationLogDomain, incomingLogs: ReadonlyArray<Record<string, unknown>>, store: WritableGenerationLogStore = defaultStores[domain], runExclusive: ExclusiveRunner = runGenerationLogsExclusive) {
     return (await mergeStoredGenerationSnapshot(domain, { logs: [...incomingLogs], tombstones: [] }, store, runExclusive)).logs;
 }

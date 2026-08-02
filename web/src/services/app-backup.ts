@@ -107,6 +107,10 @@ export async function downloadAppBackup() {
 }
 
 export async function verifyAppBackup(file: Blob): Promise<AppBackupSummary> {
+    return (await readVerifiedAppBackup(file)).summary;
+}
+
+export async function readVerifiedAppBackup(file: Blob) {
     const entries = await readZip(file, { maxCompressedBytes: MAX_APP_BACKUP_BYTES, maxExpandedBytes: MAX_APP_BACKUP_BYTES + 8 * 1024 * 1024 });
     const manifestFile = entries.get(BACKUP_MANIFEST_PATH);
     if (!manifestFile || manifestFile.size > 8 * 1024 * 1024) throw new Error("备份包缺少有效 backup.json");
@@ -123,7 +127,7 @@ export async function verifyAppBackup(file: Blob): Promise<AppBackupSummary> {
         if (!blob || blob.size !== item.bytes || (await sha256Blob(blob)) !== item.sha256) throw new Error(`备份文件校验失败: ${item.path}`);
         verifiedPaths.add(item.path);
     }
-    return summarizeBackup(manifest);
+    return { manifest, entries, summary: summarizeBackup(manifest) };
 }
 
 export function parseAppBackupManifest(input: string): AppBackupManifest {

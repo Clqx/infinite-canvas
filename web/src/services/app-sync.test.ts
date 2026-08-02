@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { mergeDomainRecords, normalizeSharedSyncFile, prepareSyncFile, verifyRemoteSyncFile } from "./app-sync";
+import { commitSyncSnapshot, mergeDomainRecords, normalizeSharedSyncFile, prepareSyncFile, verifyRemoteSyncFile } from "./app-sync";
 import { sha256Blob } from "./content-digest";
 
 test("domain merge keeps tombstones and lets deletion win at the same timestamp", () => {
@@ -76,4 +76,32 @@ test("shared sync content paths use one canonical MIME description", () => {
     const normalized = normalizeSharedSyncFile({ ...shared, storageKey: "image:second", mimeType: "application/octet-stream" }, shared);
 
     assert.equal(normalized.mimeType, "image/png");
+});
+
+test("unified sync applies remote data only after the root pointer is committed and verified", async () => {
+    const events: string[] = [];
+    await commitSyncSnapshot({
+        uploadManifests: async () => void events.push("manifests"),
+        verifyLegacy: async () => void events.push("legacy-verified"),
+        commitRoot: async () => void events.push("root-committed"),
+        verifyRoot: async () => void events.push("root-verified"),
+        applyLocal: async () => void events.push("local-applied"),
+    });
+    assert.deepEqual(events, ["manifests", "legacy-verified", "root-committed", "root-verified", "local-applied"]);
+
+    events.length = 0;
+    await assert.rejects(
+        commitSyncSnapshot({
+            uploadManifests: async () => void events.push("manifests"),
+            verifyLegacy: async () => void events.push("legacy-verified"),
+            commitRoot: async () => {
+                events.push("root-failed");
+                throw new Error("root write failed");
+            },
+            verifyRoot: async () => void events.push("root-verified"),
+            applyLocal: async () => void events.push("local-applied"),
+        }),
+        /root write failed/,
+    );
+    assert.deepEqual(events, ["manifests", "legacy-verified", "root-failed"]);
 });

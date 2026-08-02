@@ -6,6 +6,7 @@ import { App, ConfigProvider } from "antd";
 import zhCN from "antd/locale/zh_CN";
 
 import { ClientRootInit } from "@/components/layout/client-root-init";
+import { AppRestoreGate } from "@/components/layout/app-restore-gate";
 import { LocalVaultGate } from "@/components/auth/local-vault-gate";
 import { VaultSaveFailureNotifier } from "@/components/auth/vault-save-failure-notifier";
 import { getAntThemeConfig } from "@/lib/app-theme";
@@ -37,7 +38,9 @@ export function AppProviders({ children }: { children: ReactNode }) {
                     <VaultSaveFailureNotifier />
                     <QueryClientProvider client={queryClient}>
                         <LocalVaultGate>
-                            <ClientRootInit>{children}</ClientRootInit>
+                            <ClientRootInit>
+                                <AppRestoreGate>{children}</AppRestoreGate>
+                            </ClientRootInit>
                         </LocalVaultGate>
                     </QueryClientProvider>
                 </App>

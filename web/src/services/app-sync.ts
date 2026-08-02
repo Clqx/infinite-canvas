@@ -4,22 +4,26 @@ import { getImageBlob, resolveImageUrl, setImageBlob } from "@/services/image-st
 import { downloadVersionedWebdavFile, downloadWebdavFile, uploadWebdavFile, WebdavConflictError, WEBDAV_MANIFEST_FILE_NAME } from "@/services/webdav-sync";
 import { flushAppDataPersistence } from "@/services/app-data-persistence-actions";
 import { createDomainManifest, parseDomainManifest, type AppSyncFile, type ParsedDomainManifest } from "@/services/app-sync-manifest";
+import { APP_SYNC_DOMAIN_KEYS, APP_SYNC_ROOT_FILE_NAME, createAppSyncRoot, describeSnapshotManifest, parseAppSyncRoot, verifySnapshotManifest, type AppSyncDomainKey, type AppSyncManifestPointer } from "@/services/app-sync-root";
 import { sha256Blob } from "@/services/content-digest";
+import { nanoid } from "nanoid";
 import type { Asset } from "@/stores/use-asset-store";
 import { useAssetStore } from "@/stores/use-asset-store";
 import type { WebdavSyncConfig } from "@/stores/use-config-store";
 import type { CanvasProject } from "@/stores/canvas/use-canvas-store";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { compareTombstones, migrateAssetData, migrateCanvasData, parseTombstone, type SyncTombstone } from "@/services/app-data-schema";
+import { createBrowserExclusiveRunner } from "@/services/reliable-state-storage";
 
 type StoredLog = Record<string, unknown> & { id?: string };
-export type AppSyncDomainKey = "canvas" | "assets" | "image-workbench" | "video-workbench";
+export type { AppSyncDomainKey } from "@/services/app-sync-root";
 type DomainKey = AppSyncDomainKey;
 type CanvasDomainData = { projects: CanvasProject[]; projectTombstones: SyncTombstone[] };
 type AssetDomainData = { assets: Asset[]; assetTombstones: SyncTombstone[] };
 type LogDomainData = { logs: StoredLog[]; tombstones: SyncTombstone[] };
 
-type DomainManifest<T> = ParsedDomainManifest<T, DomainKey> & { etag: string | null };
+type DomainManifest<T> = ParsedDomainManifest<T, DomainKey>;
+type LegacyDomainManifest<T> = DomainManifest<T> & { etag: string | null };
 
 type SyncDomainOptions<T> = {
     key: DomainKey;
@@ -30,13 +34,21 @@ type SyncDomainOptions<T> = {
     applyData?: (data: T) => Promise<T>;
 };
 
-type SyncDomainResult<T> = {
+type PreparedDomain<T> = {
     data: T;
-    mergedRemote: boolean;
+    stagedFiles: Array<{ item: AppSyncFile; blob: Blob }>;
+    manifestFile: Blob;
+    options: SyncDomainOptions<T>;
     files: number;
-    manifestBytes: number;
     uploadedFiles: number;
     uploadedBytes: number;
+};
+
+type RemoteSnapshot = {
+    rootEtag: string | null;
+    manifests: Map<DomainKey, DomainManifest<unknown>>;
+    legacyEtags: Record<DomainKey, string | null> | null;
+    hasRemote: boolean;
 };
 
 export type AppSyncResult = {
@@ -65,142 +77,228 @@ export type AppSyncProgress = (event: AppSyncProgressEvent) => void;
 
 const FILE_CONCURRENCY = 3;
 const storageKeyPattern = /^(image|video|audio|file|video-reference|audio-reference):/;
+const runMaintenanceExclusive = createBrowserExclusiveRunner("app-maintenance");
 
 export async function syncAppDataToWebdav(config: WebdavSyncConfig, onProgress?: AppSyncProgress): Promise<AppSyncResult> {
-    emitProgress(onProgress, { stage: "等待本地数据加载" });
-    await Promise.all([waitForHydration(useCanvasStore), waitForHydration(useAssetStore)]);
-
-    const [canvas, assets, imageLogs, videoLogs] = await Promise.all([
-        syncDomain<CanvasDomainData>(config, onProgress, {
-            key: "canvas",
-            label: "画布",
-            emptyData: { projects: [], projectTombstones: [] },
-            localData: async () => ({ projects: useCanvasStore.getState().projects, projectTombstones: useCanvasStore.getState().projectTombstones }),
-            mergeData: (local, remote) => {
-                const merged = mergeDomainRecords(local.projects, local.projectTombstones, remote.projects, remote.projectTombstones, "updatedAt");
-                return { projects: merged.records, projectTombstones: merged.tombstones };
-            },
-            applyData: async (data) => {
-                const current = useCanvasStore.getState();
-                const merged = mergeDomainRecords(current.projects, current.projectTombstones, data.projects, data.projectTombstones, "updatedAt");
-                const applied = { projects: merged.records, projectTombstones: merged.tombstones };
-                useCanvasStore.getState().replaceProjects(applied.projects, applied.projectTombstones);
-                await flushAppDataPersistence();
-                return applied;
-            },
-        }),
-        syncDomain<AssetDomainData>(config, onProgress, {
-            key: "assets",
-            label: "我的资产",
-            emptyData: { assets: [], assetTombstones: [] },
-            localData: async () => ({ assets: useAssetStore.getState().assets, assetTombstones: useAssetStore.getState().assetTombstones }),
-            mergeData: (local, remote) => {
-                const merged = mergeDomainRecords(local.assets, local.assetTombstones, remote.assets, remote.assetTombstones, "updatedAt");
-                return { assets: merged.records, assetTombstones: merged.tombstones };
-            },
-            applyData: async (data) => {
-                const current = useAssetStore.getState();
-                const merged = mergeDomainRecords(current.assets, current.assetTombstones, data.assets, data.assetTombstones, "updatedAt");
-                const applied = { assets: merged.records, assetTombstones: merged.tombstones };
-                useAssetStore.getState().replaceAssets(await Promise.all(applied.assets.map(hydrateAsset)), applied.assetTombstones);
-                await flushAppDataPersistence();
-                return applied;
-            },
-        }),
-        syncDomain<LogDomainData>(config, onProgress, {
-            key: "image-workbench",
-            label: "生图工作台",
-            emptyData: { logs: [], tombstones: [] },
-            localData: async () => readStoredGenerationSnapshot("image") as Promise<LogDomainData>,
-            mergeData: (local, remote) => {
-                const merged = mergeDomainRecords(local.logs, local.tombstones, remote.logs, remote.tombstones, "updatedAt");
-                return { logs: merged.records, tombstones: merged.tombstones };
-            },
-            applyData: async (data) => (await mergeStoredGenerationSnapshot("image", data)) as LogDomainData,
-        }),
-        syncDomain<LogDomainData>(config, onProgress, {
-            key: "video-workbench",
-            label: "视频创作台",
-            emptyData: { logs: [], tombstones: [] },
-            localData: async () => readStoredGenerationSnapshot("video") as Promise<LogDomainData>,
-            mergeData: (local, remote) => {
-                const merged = mergeDomainRecords(local.logs, local.tombstones, remote.logs, remote.tombstones, "updatedAt");
-                return { logs: merged.records, tombstones: merged.tombstones };
-            },
-            applyData: async (data) => (await mergeStoredGenerationSnapshot("video", data)) as LogDomainData,
-        }),
-    ]);
-
-    const result = {
-        syncedAt: new Date().toISOString(),
-        mergedRemote: [canvas, assets, imageLogs, videoLogs].some((item) => item.mergedRemote),
-        projects: canvas.data.projects.length,
-        assets: assets.data.assets.length,
-        imageLogs: imageLogs.data.logs.length,
-        videoLogs: videoLogs.data.logs.length,
-        files: canvas.files + assets.files + imageLogs.files + videoLogs.files,
-        manifestBytes: canvas.manifestBytes + assets.manifestBytes + imageLogs.manifestBytes + videoLogs.manifestBytes,
-        uploadedFiles: canvas.uploadedFiles + assets.uploadedFiles + imageLogs.uploadedFiles + videoLogs.uploadedFiles,
-        uploadedBytes: canvas.uploadedBytes + assets.uploadedBytes + imageLogs.uploadedBytes + videoLogs.uploadedBytes,
-    };
-    emitProgress(onProgress, { stage: "同步完成", status: "success" });
-    return result;
+    return runMaintenanceExclusive(() => syncAppDataToWebdavExclusive(config, onProgress));
 }
 
-async function syncDomain<T>(config: WebdavSyncConfig, onProgress: AppSyncProgress | undefined, options: SyncDomainOptions<T>): Promise<SyncDomainResult<T>> {
+async function syncAppDataToWebdavExclusive(config: WebdavSyncConfig, onProgress?: AppSyncProgress): Promise<AppSyncResult> {
+    emitProgress(onProgress, { stage: "等待本地数据加载" });
+    await Promise.all([waitForHydration(useCanvasStore), waitForHydration(useAssetStore)]);
     for (let attempt = 0; attempt < 3; attempt += 1) {
         try {
-            emitProgress(onProgress, { domain: options.key, label: options.label, stage: "读取远端清单", status: "active" });
-            const remoteManifest = await readDomainManifest(config, options.key, options.emptyData);
-            emitProgress(onProgress, { domain: options.key, label: options.label, stage: "读取本地数据", status: "active" });
-            const localData = await options.localData();
-            let mergedData = remoteManifest ? options.mergeData(localData, remoteManifest.data) : localData;
-            let stagedFiles: Array<{ item: AppSyncFile; blob: Blob }> = [];
-
-            if (remoteManifest) {
-                emitProgress(onProgress, { domain: options.key, label: options.label, stage: "下载缺失媒体", status: "active" });
-                stagedFiles = await downloadMissingFiles(config, options.key, mergedData, remoteManifest.files, onProgress);
-                mergedData = options.mergeData(await options.localData(), mergedData);
-            }
-
-            emitProgress(onProgress, { domain: options.key, label: options.label, stage: "上传新增媒体", status: "active" });
-            const uploaded = await uploadChangedFiles(config, options.key, mergedData, remoteManifest?.files || [], new Map(stagedFiles.map((item) => [item.item.storageKey, item.blob])), onProgress);
-            const manifest = createDomainManifest(options.key, mergedData, uploaded.files);
-            const manifestFile = new Blob([JSON.stringify(manifest, null, 2)], { type: "application/json" });
-            emitProgress(onProgress, { domain: options.key, label: options.label, stage: `上传清单 ${formatBytes(manifestFile.size)}`, status: "active" });
-            await uploadWebdavFile(config, domainPath(options.key, WEBDAV_MANIFEST_FILE_NAME), manifestFile, "application/json", remoteManifest?.etag ?? null);
-            await verifyManifestCommit(config, options.key, manifestFile);
-            for (const staged of stagedFiles) {
-                await (staged.item.storageKey.startsWith("image:") ? setImageBlob(staged.item.storageKey, staged.blob) : setMediaBlob(staged.item.storageKey, staged.blob));
-            }
-            if (options.applyData) mergedData = await options.applyData(mergedData);
-            emitProgress(onProgress, { domain: options.key, label: options.label, stage: "完成", current: 1, total: 1, status: "success" });
-
-            return {
-                data: mergedData,
-                mergedRemote: Boolean(remoteManifest),
-                files: uploaded.files.length,
-                manifestBytes: manifestFile.size,
-                uploadedFiles: uploaded.uploadedFiles,
-                uploadedBytes: uploaded.uploadedBytes,
-            };
+            return await syncSnapshot(config, onProgress);
         } catch (error) {
             if (error instanceof WebdavConflictError && attempt < 2) {
-                emitProgress(onProgress, { domain: options.key, label: options.label, stage: `远端已更新，重新合并 (${attempt + 1}/2)`, status: "active" });
+                emitProgress(onProgress, { stage: `远端已更新，重新合并全部数据 (${attempt + 1}/2)`, status: "active" });
                 continue;
             }
-            emitProgress(onProgress, { domain: options.key, label: options.label, stage: error instanceof Error ? error.message : "同步失败", status: "exception" });
+            emitProgress(onProgress, { stage: error instanceof Error ? error.message : "同步失败", status: "exception" });
             throw error;
         }
     }
     throw new WebdavConflictError("WebDAV 远端连续更新，已停止本次同步，请稍后重试");
 }
 
-async function readDomainManifest<T>(config: WebdavSyncConfig, domain: DomainKey, emptyData: T): Promise<DomainManifest<T> | null> {
+async function syncSnapshot(config: WebdavSyncConfig, onProgress?: AppSyncProgress): Promise<AppSyncResult> {
+    emitProgress(onProgress, { stage: "读取远端统一快照", status: "active" });
+    const remote = await readRemoteSnapshot(config);
+    await flushAppDataPersistence();
+
+    const canvasOptions: SyncDomainOptions<CanvasDomainData> = {
+        key: "canvas",
+        label: "画布",
+        emptyData: { projects: [], projectTombstones: [] },
+        localData: async () => ({ projects: useCanvasStore.getState().projects, projectTombstones: useCanvasStore.getState().projectTombstones }),
+        mergeData: (local, remoteData) => {
+            const merged = mergeDomainRecords(local.projects, local.projectTombstones, remoteData.projects, remoteData.projectTombstones, "updatedAt");
+            return { projects: merged.records, projectTombstones: merged.tombstones };
+        },
+        applyData: async (data) => {
+            const current = useCanvasStore.getState();
+            const merged = mergeDomainRecords(current.projects, current.projectTombstones, data.projects, data.projectTombstones, "updatedAt");
+            const applied = { projects: merged.records, projectTombstones: merged.tombstones };
+            useCanvasStore.getState().replaceProjects(applied.projects, applied.projectTombstones);
+            await flushAppDataPersistence();
+            return applied;
+        },
+    };
+    const assetOptions: SyncDomainOptions<AssetDomainData> = {
+        key: "assets",
+        label: "我的资产",
+        emptyData: { assets: [], assetTombstones: [] },
+        localData: async () => ({ assets: useAssetStore.getState().assets, assetTombstones: useAssetStore.getState().assetTombstones }),
+        mergeData: (local, remoteData) => {
+            const merged = mergeDomainRecords(local.assets, local.assetTombstones, remoteData.assets, remoteData.assetTombstones, "updatedAt");
+            return { assets: merged.records, assetTombstones: merged.tombstones };
+        },
+        applyData: async (data) => {
+            const current = useAssetStore.getState();
+            const merged = mergeDomainRecords(current.assets, current.assetTombstones, data.assets, data.assetTombstones, "updatedAt");
+            const applied = { assets: merged.records, assetTombstones: merged.tombstones };
+            useAssetStore.getState().replaceAssets(await Promise.all(applied.assets.map(hydrateAsset)), applied.assetTombstones);
+            await flushAppDataPersistence();
+            return applied;
+        },
+    };
+    const imageOptions = logSyncOptions("image-workbench", "生图工作台", "image");
+    const videoOptions = logSyncOptions("video-workbench", "视频创作台", "video");
+    const [canvas, assets, imageLogs, videoLogs] = await Promise.all([
+        prepareDomain(config, onProgress, canvasOptions, remote.manifests.get("canvas") as DomainManifest<CanvasDomainData> | undefined),
+        prepareDomain(config, onProgress, assetOptions, remote.manifests.get("assets") as DomainManifest<AssetDomainData> | undefined),
+        prepareDomain(config, onProgress, imageOptions, remote.manifests.get("image-workbench") as DomainManifest<LogDomainData> | undefined),
+        prepareDomain(config, onProgress, videoOptions, remote.manifests.get("video-workbench") as DomainManifest<LogDomainData> | undefined),
+    ]);
+
+    const snapshotId = nanoid();
+    const prepared = [canvas, assets, imageLogs, videoLogs] as const;
+    const pointers = {} as Record<DomainKey, AppSyncManifestPointer>;
+    let rootFile = new Blob();
+    await commitSyncSnapshot({
+        uploadManifests: async () => {
+            for (const item of prepared) {
+                const path = snapshotManifestPath(snapshotId, item.options.key);
+                emitProgress(onProgress, { domain: item.options.key, label: item.options.label, stage: `上传快照清单 ${formatBytes(item.manifestFile.size)}`, status: "active" });
+                await uploadWebdavFile(config, path, item.manifestFile, "application/json", null);
+                pointers[item.options.key] = await describeSnapshotManifest(path, item.manifestFile);
+            }
+        },
+        verifyLegacy: () => (remote.legacyEtags ? assertLegacySnapshotUnchanged(config, remote.legacyEtags) : Promise.resolve()),
+        commitRoot: async () => {
+            const root = createAppSyncRoot(snapshotId, pointers);
+            rootFile = new Blob([JSON.stringify(root, null, 2)], { type: "application/json" });
+            emitProgress(onProgress, { stage: "提交统一快照", status: "active" });
+            await uploadWebdavFile(config, APP_SYNC_ROOT_FILE_NAME, rootFile, "application/json", remote.rootEtag);
+        },
+        verifyRoot: () => verifyRootCommit(config, rootFile),
+        applyLocal: async () => {
+            await applyPreparedDomain(canvas, onProgress);
+            await applyPreparedDomain(assets, onProgress);
+            await applyPreparedDomain(imageLogs, onProgress);
+            await applyPreparedDomain(videoLogs, onProgress);
+        },
+    });
+    const result = {
+        syncedAt: new Date().toISOString(),
+        mergedRemote: remote.hasRemote,
+        projects: canvas.data.projects.length,
+        assets: assets.data.assets.length,
+        imageLogs: imageLogs.data.logs.length,
+        videoLogs: videoLogs.data.logs.length,
+        files: prepared.reduce((sum, item) => sum + item.files, 0),
+        manifestBytes: rootFile.size + prepared.reduce((sum, item) => sum + item.manifestFile.size, 0),
+        uploadedFiles: prepared.reduce((sum, item) => sum + item.uploadedFiles, 0),
+        uploadedBytes: prepared.reduce((sum, item) => sum + item.uploadedBytes, 0),
+    };
+    emitProgress(onProgress, { stage: "同步完成", status: "success" });
+    return result;
+}
+
+export async function commitSyncSnapshot(operations: { uploadManifests: () => Promise<void>; verifyLegacy: () => Promise<void>; commitRoot: () => Promise<void>; verifyRoot: () => Promise<void>; applyLocal: () => Promise<void> }) {
+    await operations.uploadManifests();
+    await operations.verifyLegacy();
+    await operations.commitRoot();
+    await operations.verifyRoot();
+    await operations.applyLocal();
+}
+
+function logSyncOptions(key: "image-workbench" | "video-workbench", label: string, type: "image" | "video"): SyncDomainOptions<LogDomainData> {
+    return {
+        key,
+        label,
+        emptyData: { logs: [], tombstones: [] },
+        localData: async () => readStoredGenerationSnapshot(type) as Promise<LogDomainData>,
+        mergeData: (local, remote) => {
+            const merged = mergeDomainRecords(local.logs, local.tombstones, remote.logs, remote.tombstones, "updatedAt");
+            return { logs: merged.records, tombstones: merged.tombstones };
+        },
+        applyData: async (data) => (await mergeStoredGenerationSnapshot(type, data)) as LogDomainData,
+    };
+}
+
+async function prepareDomain<T>(config: WebdavSyncConfig, onProgress: AppSyncProgress | undefined, options: SyncDomainOptions<T>, remoteManifest?: DomainManifest<T>): Promise<PreparedDomain<T>> {
+    emitProgress(onProgress, { domain: options.key, label: options.label, stage: "读取本地数据", status: "active" });
+    const localData = await options.localData();
+    let mergedData = remoteManifest ? options.mergeData(localData, remoteManifest.data) : localData;
+    let stagedFiles: Array<{ item: AppSyncFile; blob: Blob }> = [];
+    if (remoteManifest) {
+        emitProgress(onProgress, { domain: options.key, label: options.label, stage: "下载缺失媒体", status: "active" });
+        stagedFiles = await downloadMissingFiles(config, options.key, mergedData, remoteManifest.files, onProgress);
+        mergedData = options.mergeData(await options.localData(), mergedData);
+    }
+    emitProgress(onProgress, { domain: options.key, label: options.label, stage: "上传新增媒体", status: "active" });
+    const uploaded = await uploadChangedFiles(config, options.key, mergedData, remoteManifest?.files || [], new Map(stagedFiles.map((item) => [item.item.storageKey, item.blob])), onProgress);
+    const manifest = createDomainManifest(options.key, mergedData, uploaded.files);
+    return {
+        data: mergedData,
+        stagedFiles,
+        manifestFile: new Blob([JSON.stringify(manifest, null, 2)], { type: "application/json" }),
+        options,
+        files: uploaded.files.length,
+        uploadedFiles: uploaded.uploadedFiles,
+        uploadedBytes: uploaded.uploadedBytes,
+    };
+}
+
+async function applyPreparedDomain<T>(prepared: PreparedDomain<T>, onProgress?: AppSyncProgress) {
+    for (const staged of prepared.stagedFiles) {
+        await (staged.item.storageKey.startsWith("image:") ? setImageBlob(staged.item.storageKey, staged.blob) : setMediaBlob(staged.item.storageKey, staged.blob));
+    }
+    if (prepared.options.applyData) prepared.data = await prepared.options.applyData(prepared.data);
+    emitProgress(onProgress, { domain: prepared.options.key, label: prepared.options.label, stage: "完成", current: 1, total: 1, status: "success" });
+}
+
+async function readRemoteSnapshot(config: WebdavSyncConfig): Promise<RemoteSnapshot> {
+    const rootRemote = await downloadVersionedWebdavFile(config, APP_SYNC_ROOT_FILE_NAME);
+    if (rootRemote.file) {
+        const root = parseAppSyncRoot(await rootRemote.file.text());
+        const manifests = new Map<DomainKey, DomainManifest<unknown>>();
+        await Promise.all(
+            APP_SYNC_DOMAIN_KEYS.map(async (domain) => {
+                const pointer = root.manifests[domain];
+                const file = await downloadWebdavFile(config, pointer.path);
+                await verifySnapshotManifest(pointer, file);
+                manifests.set(
+                    domain,
+                    parseDomainManifest(await file!.text(), domain, (value, version) => parseDomainData(domain, value, version, undefined)),
+                );
+            }),
+        );
+        return { rootEtag: rootRemote.etag, manifests, legacyEtags: null, hasRemote: true };
+    }
+
+    const legacy = await Promise.all(APP_SYNC_DOMAIN_KEYS.map((domain) => readLegacyDomainManifest(config, domain)));
+    const manifests = new Map<DomainKey, DomainManifest<unknown>>();
+    const legacyEtags = {} as Record<DomainKey, string | null>;
+    legacy.forEach((manifest, index) => {
+        const domain = APP_SYNC_DOMAIN_KEYS[index];
+        legacyEtags[domain] = manifest?.etag ?? null;
+        if (manifest) manifests.set(domain, manifest);
+    });
+    return { rootEtag: null, manifests, legacyEtags, hasRemote: manifests.size > 0 };
+}
+
+async function readLegacyDomainManifest(config: WebdavSyncConfig, domain: DomainKey): Promise<LegacyDomainManifest<unknown> | null> {
     const remote = await downloadVersionedWebdavFile(config, domainPath(domain, WEBDAV_MANIFEST_FILE_NAME));
     if (!remote.file) return null;
-    const parsed = parseDomainManifest(await remote.file.text(), domain, (value, version) => parseDomainData(domain, value, version, emptyData));
+    const parsed = parseDomainManifest(await remote.file.text(), domain, (value, version) => parseDomainData(domain, value, version, undefined));
     return { ...parsed, etag: remote.etag };
+}
+
+async function assertLegacySnapshotUnchanged(config: WebdavSyncConfig, expected: Record<DomainKey, string | null>) {
+    const current = await Promise.all(APP_SYNC_DOMAIN_KEYS.map((domain) => downloadVersionedWebdavFile(config, domainPath(domain, WEBDAV_MANIFEST_FILE_NAME))));
+    if (current.some((item, index) => item.etag !== expected[APP_SYNC_DOMAIN_KEYS[index]])) throw new WebdavConflictError("WebDAV 旧版清单在迁移期间已更新");
+}
+
+async function verifyRootCommit(config: WebdavSyncConfig, expected: Blob) {
+    const committed = await downloadVersionedWebdavFile(config, APP_SYNC_ROOT_FILE_NAME);
+    if (!committed.file || committed.file.size !== expected.size || (await sha256Blob(committed.file)) !== (await sha256Blob(expected))) throw new WebdavConflictError("WebDAV 根指针写入后已发生变化");
+    parseAppSyncRoot(await committed.file.text());
+}
+
+function snapshotManifestPath(snapshotId: string, domain: DomainKey) {
+    return `snapshots/${snapshotId}/${domain}.json`;
 }
 
 async function downloadMissingFiles<T>(config: WebdavSyncConfig, domain: DomainKey, data: T, remoteFiles: AppSyncFile[], onProgress?: AppSyncProgress) {

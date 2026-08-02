@@ -88,9 +88,11 @@ export const useAssetStore = create<AssetStore>()(
                 })),
             replaceAssets: (assets, tombstones) => set((state) => ({ assets, assetTombstones: tombstones || state.assetTombstones })),
             cleanupImages: async (extra) => {
+                const { readPendingAppRestoreMediaKeys } = await import("@/services/app-restore");
+                const pendingRestoreMedia = (await readPendingAppRestoreMediaKeys()).map((storageKey) => ({ storageKey }));
                 await cleanupAppMediaAfterFlush({
                     flush: appDataPersistence.flushAll,
-                    withUsedData: (operation) => withAuthoritativeAppData((data) => withAllStoredGenerationLogs((generationLogs) => operation({ ...data, generationLogs, extra }))),
+                    withUsedData: (operation) => withAuthoritativeAppData((data) => withAllStoredGenerationLogs((generationLogs) => operation({ ...data, generationLogs, pendingRestoreMedia, extra }))),
                     cleanupImages: cleanupUnusedImages,
                     cleanupMedia: cleanupUnusedMedia,
                 });

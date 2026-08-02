@@ -1,14 +1,17 @@
 import { App, Button } from "antd";
-import { Download, FileCheck2 } from "lucide-react";
+import { Download, FileCheck2, FolderInput } from "lucide-react";
 import { useRef, useState } from "react";
 
 import { downloadAppBackup, MAX_APP_BACKUP_MEDIA_BYTES, verifyAppBackup, type AppBackupSummary } from "@/services/app-backup";
+import { importAppBackupAsCopies } from "@/services/app-restore";
 
 export function AppBackupPanel() {
-    const { message } = App.useApp();
+    const { message, modal } = App.useApp();
     const inputRef = useRef<HTMLInputElement>(null);
+    const importInputRef = useRef<HTMLInputElement>(null);
     const [exporting, setExporting] = useState(false);
     const [verifying, setVerifying] = useState(false);
+    const [importing, setImporting] = useState(false);
     const [summary, setSummary] = useState<AppBackupSummary | null>(null);
 
     const exportBackup = async () => {
@@ -22,6 +25,29 @@ export function AppBackupPanel() {
         } finally {
             setExporting(false);
         }
+    };
+
+    const importBackup = (file?: File) => {
+        if (!file) return;
+        importInputRef.current && (importInputRef.current.value = "");
+        modal.confirm({
+            title: "将备份导入为副本？",
+            content: "导入会创建新的画布、资产、生成记录和媒体键，不会覆盖当前内容。",
+            okText: "导入为副本",
+            cancelText: "取消",
+            onOk: async () => {
+                setImporting(true);
+                try {
+                    const result = await importAppBackupAsCopies(file);
+                    message.success(`已导入 ${result.projects} 个画布、${result.assets} 个资产和 ${result.imageLogs + result.videoLogs} 条生成记录`);
+                } catch (error) {
+                    message.error(error instanceof Error ? error.message : "备份副本导入失败");
+                    throw error;
+                } finally {
+                    setImporting(false);
+                }
+            },
+        });
     };
 
     const verifyBackup = async (file?: File) => {
@@ -48,13 +74,17 @@ export function AppBackupPanel() {
                     <div className="mt-1 text-xs text-stone-500">完整备份媒体上限 {MAX_APP_BACKUP_MEDIA_BYTES / 1024 / 1024}MB</div>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                    <Button icon={<Download className="size-4" />} loading={exporting} disabled={verifying} onClick={() => void exportBackup()}>
+                    <Button icon={<Download className="size-4" />} loading={exporting} disabled={verifying || importing} onClick={() => void exportBackup()}>
                         导出完整备份
                     </Button>
-                    <Button icon={<FileCheck2 className="size-4" />} loading={verifying} disabled={exporting} onClick={() => inputRef.current?.click()}>
+                    <Button icon={<FileCheck2 className="size-4" />} loading={verifying} disabled={exporting || importing} onClick={() => inputRef.current?.click()}>
                         恢复演练
                     </Button>
+                    <Button icon={<FolderInput className="size-4" />} loading={importing} disabled={exporting || verifying} onClick={() => importInputRef.current?.click()}>
+                        导入为副本
+                    </Button>
                     <input ref={inputRef} type="file" accept="application/zip,.zip" className="hidden" onChange={(event) => void verifyBackup(event.target.files?.[0])} />
+                    <input ref={importInputRef} type="file" accept="application/zip,.zip" className="hidden" onChange={(event) => importBackup(event.target.files?.[0])} />
                 </div>
             </div>
             {summary ? (
